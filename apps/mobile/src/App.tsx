@@ -27,7 +27,7 @@ import { useUiRuntimeMemoryWarningGc } from "./lib/useUiRuntimeMemoryWarningGc";
 import { SubscriptionUsageCoordinator } from "./widgets/SubscriptionUsageCoordinator";
 import { VoiceInputProvider } from "./features/voice-input/VoiceInputProvider";
 import { GlobalVoiceInputControl } from "./features/voice-input/GlobalVoiceInputControl";
-import { NativeLayoutMetricsProvider } from "./features/layout/native-layout-metrics";
+import { NativeLayoutMetricsProvider } from "./native/native-layout-metrics";
 
 import "../global.css";
 
