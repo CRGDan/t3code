@@ -367,7 +367,11 @@ export const loadProtectedSocketConfig = async (input: {
   return { socketPath, secret };
 };
 
-/** Starts the socket when configured; logs and stays off when not or when unsafe. */
+/**
+ * Starts the socket when configured; logs and stays off when not or when unsafe.
+ * Logs carry the problem and errno code, never an error's text: a JSON parse
+ * error quotes the config file's contents.
+ */
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
@@ -383,10 +387,10 @@ export const layer = Layer.effectDiscard(
     }).pipe(
       Effect.catchTags({
         ProtectedSocketConfigError: (error) =>
-          Effect.logWarning("Protected authentication socket stays off: invalid config.", {
-            configPath,
-            cause: error.message,
-          }).pipe(Effect.as(null)),
+          Effect.logWarning(
+            `Protected authentication socket stays off: ${CONFIG_PROBLEMS[error.problem]}`,
+            { configPath, problem: error.problem, errno: errnoCode(error.cause) ?? null },
+          ).pipe(Effect.as(null)),
       }),
     );
     if (loaded === null) return;
@@ -413,7 +417,8 @@ export const layer = Layer.effectDiscard(
         ProtectedSocketStartError: (error) =>
           Effect.logWarning("Protected authentication socket failed to start.", {
             socketPath: loaded.socketPath,
-            cause: String(error.cause ?? error.message),
+            problem: error.problem,
+            errno: errnoCode(error.cause) ?? null,
           }),
       }),
     );
