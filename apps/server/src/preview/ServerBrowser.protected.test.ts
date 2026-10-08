@@ -15,6 +15,7 @@ import {
   type PreviewAutomationSnapshot,
   type PreviewAutomationStatus,
 } from "@t3tools/contracts";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -33,8 +34,6 @@ import type { ProtectedHostError } from "./ProtectedAuthentication.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 
 // Real headless Chromium against a local site: these properties live in the page.
-// Like ServerBrowserPage.test.ts, run unsandboxed: test hosts lack T3's AppArmor profile.
-process.env.T3CODE_SERVER_BROWSER_SANDBOX = "0";
 const PASSWORD = "sentinel-password-7Hq2";
 const TOTP = "424242";
 
@@ -219,6 +218,11 @@ const layer = ServerBrowser.layer.pipe(
         isAttached: () => Effect.succeed(false),
         endpoint: () => Effect.die("no desktop"),
         pointer: () => Effect.void,
+      }),
+      // Like ServerBrowserPage.test.ts, run unsandboxed: test hosts lack T3's AppArmor profile.
+      Layer.succeed(HostProcessEnvironment, {
+        ...process.env,
+        T3CODE_SERVER_BROWSER_SANDBOX: "0",
       }),
     ).pipe(
       Layer.provideMerge(
