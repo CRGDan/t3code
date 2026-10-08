@@ -74,6 +74,7 @@ import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { ServerBrowserContexts } from "./ServerBrowserContexts.ts";
+import { GrantRegistry } from "./ProtectedAuthentication.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 
 const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
@@ -455,6 +456,7 @@ const make = Effect.gen(function* () {
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
+  const grants = new GrantRegistry();
 
   const contexts = new ServerBrowserContexts({
     profilesDir: NodePath.join(config.stateDir, "server-browser", "profiles"),
@@ -1585,6 +1587,25 @@ const make = Effect.gen(function* () {
       }
     }
     const tab = await requireTab(request);
+    if (request.operation === "authenticationGrant") {
+      if (tab.control.controller !== null)
+        throw new BrowserControlInterrupted("A human controls this tab.", "humanControl");
+      if (tab.desktop)
+        throw new ServerBrowserPage.ServerBrowserOperationError(
+          "PreviewAutomationExecutionError",
+          "Protected authentication needs a headless server tab; this tab renders in the desktop app.",
+        );
+      const minted = grants.mint({
+        threadId: tab.threadId,
+        tabId: tab.tabId,
+        agentSessionId: request.agentSessionId!,
+      });
+      return {
+        grant: minted.grant,
+        tabId: tab.tabId,
+        expiresAt: new Date(minted.expiresAt).toISOString(),
+      };
+    }
     // Closing must unblock an action waiting on a dialog, without queueing behind it.
     if (request.operation === "close") {
       if (tab.control.controller !== null)

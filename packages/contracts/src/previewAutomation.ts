@@ -53,6 +53,7 @@ export const PREVIEW_AUTOMATION_SERVER_OPERATIONS = [
   "hover",
   "select",
   "drag",
+  "authenticationGrant",
 ] as const;
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_SERVER_OPERATIONS);
 export type PreviewAutomationOperation = typeof PreviewAutomationOperation.Type;
@@ -719,6 +720,28 @@ export const PreviewAutomationRecordingStatus = Schema.Struct({
 });
 export type PreviewAutomationRecordingStatus = typeof PreviewAutomationRecordingStatus.Type;
 
+export const PreviewAutomationAuthenticationGrantInput = Schema.Struct({
+  tabId: PreviewTabId.annotate({
+    description:
+      "The collaborative browser tab you own and want authenticated, from preview_open or preview_status tabs.",
+  }).annotateKey({
+    description:
+      "The collaborative browser tab you own and want authenticated, from preview_open or preview_status tabs.",
+  }),
+});
+export type PreviewAutomationAuthenticationGrantInput =
+  typeof PreviewAutomationAuthenticationGrantInput.Type;
+
+/** An opaque, single-use claim on one tab, redeemed by the protected-authentication host API. */
+export const PreviewAutomationAuthenticationGrant = Schema.Struct({
+  grant: Schema.String.annotate({
+    description: "Opaque single-use grant. Pass it unchanged to the credential service.",
+  }),
+  tabId: PreviewTabId,
+  expiresAt: Schema.String.annotate({ description: "When the unused grant expires (ISO 8601)." }),
+});
+export type PreviewAutomationAuthenticationGrant = typeof PreviewAutomationAuthenticationGrant.Type;
+
 export const PREVIEW_RECORDING_STOP_TIMEOUT_MS = 120_000;
 
 export const PreviewAutomationRecordingArtifact = Schema.Struct({
@@ -946,6 +969,7 @@ export const PreviewAutomationControlReason = Schema.Literals([
   "interrupted",
   "dialogPending",
   "tabLimit",
+  "protected",
 ]);
 export type PreviewAutomationControlReason = typeof PreviewAutomationControlReason.Type;
 
@@ -969,6 +993,8 @@ export class PreviewAutomationControlInterruptedError extends Schema.TaggedError
     if (this.reason === "tabLimit")
       return "Too many server browser tabs are open. Close one with t3_preview_close, or reuse a tabId from preview_status tabs.";
     if (this.reason === "closed") return "This browser tab is closed. Call preview_open.";
+    if (this.reason === "protected")
+      return "A protected authentication is running in this browser tab or a tab sharing its storage. Retry after it finishes.";
     if (this.reason === "interrupted")
       return "Browser control changed. Take a fresh snapshot before trying again.";
     return `Preview automation ${this.operation} was interrupted on client ${this.clientId}.`;

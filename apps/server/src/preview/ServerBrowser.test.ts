@@ -7,6 +7,7 @@ import {
   PreviewTabId,
   ProviderInstanceId,
   ThreadId,
+  type PreviewAutomationAuthenticationGrant,
   type PreviewAutomationSnapshot,
   type PreviewAutomationStatus,
 } from "@t3tools/contracts";
@@ -1087,6 +1088,74 @@ it.live("a desktop page the desktop takes back reconnects instead of closing", (
       expect(sessions.map((session) => session.tabId)).toContain(opened.tabId);
       yield* browser.attachViewer(viewerInput(opened.tabId, false));
       expect(desktopConnections).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("mints a protected-authentication grant only for the caller's own tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const grant = yield* broker.invoke<PreviewAutomationAuthenticationGrant>({
+        scope,
+        tabId,
+        operation: "authenticationGrant",
+        input: {},
+      });
+      expect(grant.tabId).toBe(tabId);
+      expect(grant.grant).toMatch(/^t3pa_[\w-]{40,}$/);
+      expect(Date.parse(grant.expiresAt)).toBeGreaterThan(Date.now());
+      const second = yield* broker.invoke<PreviewAutomationAuthenticationGrant>({
+        scope,
+        tabId,
+        operation: "authenticationGrant",
+        input: {},
+      });
+      expect(second.grant).not.toBe(grant.grant);
+      const foreign = yield* broker
+        .invoke({
+          scope: asSession("agent-b"),
+          tabId,
+          operation: "authenticationGrant",
+          input: {},
+        })
+        .pipe(Effect.flip);
+      expect(foreign).toMatchObject({
+        _tag: "PreviewAutomationControlInterruptedError",
+        reason: "agentMismatch",
+      });
+      const missing = yield* broker
+        .invoke({
+          scope,
+          tabId: PreviewTabId.make("no-such-tab"),
+          operation: "authenticationGrant",
+          input: {},
+        })
+        .pipe(Effect.flip);
+      expect(missing._tag).toBe("PreviewAutomationTabNotFoundError");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("does not mint a grant for a tab the desktop renders", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      desktopRendersNext = true;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const refused = yield* broker
+        .invoke({
+          scope,
+          tabId: PreviewTabId.make(opened.tabId!),
+          operation: "authenticationGrant",
+          input: {},
+        })
+        .pipe(Effect.flip);
+      expect(refused._tag).toBe("PreviewAutomationExecutionError");
     }),
   ).pipe(Effect.provide(layer)),
 );
