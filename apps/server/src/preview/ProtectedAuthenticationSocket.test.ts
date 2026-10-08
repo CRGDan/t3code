@@ -122,6 +122,15 @@ describe("serveProtectedHost", () => {
     expect((await NodeFSP.stat(socketPath)).mode & 0o777).toBe(0o600);
   });
 
+  it("will not replace a file that is not a socket", async () => {
+    const occupied = NodePath.join(dir, "occupied");
+    await NodeFSP.writeFile(occupied, "keep me");
+    await expect(
+      serveProtectedHost(fakeHost, { socketPath: occupied, secret: SECRET }),
+    ).rejects.toMatchObject({ _tag: "ProtectedSocketStartError", problem: "path-occupied" });
+    expect(await NodeFSP.readFile(occupied, "utf8")).toBe("keep me");
+  });
+
   it("refuses a client without the secret and hangs up", async () => {
     const client = await connect();
     expect(await client.request({ op: "begin", grant: GOOD_GRANT, deadline: 1 })).toMatchObject({
@@ -269,11 +278,30 @@ describe("loadProtectedSocketConfig", () => {
     const sharedConfig = await write("a.json", JSON.stringify({ secretFile: shared }), 0o600);
     await expect(
       loadProtectedSocketConfig({ configPath: sharedConfig, baseDir: dir }),
-    ).rejects.toThrow(/group or others/);
+    ).rejects.toMatchObject({
+      _tag: "ProtectedSocketConfigError",
+      problem: "secret-file-exposed",
+      message: expect.stringMatching(/group or others/),
+    });
     const short = await write("short", "too-short", 0o600);
     const shortConfig = await write("b.json", JSON.stringify({ secretFile: short }), 0o600);
     await expect(
       loadProtectedSocketConfig({ configPath: shortConfig, baseDir: dir }),
-    ).rejects.toThrow(/at least 32/);
+    ).rejects.toMatchObject({ problem: "secret-too-short" });
+  });
+
+  it("refuses a config that is not JSON or names a missing secret file", async () => {
+    const garbled = await write("c.json", "{ secretFile:", 0o600);
+    await expect(
+      loadProtectedSocketConfig({ configPath: garbled, baseDir: dir }),
+    ).rejects.toMatchObject({ _tag: "ProtectedSocketConfigError", problem: "config-not-json" });
+    const missing = await write(
+      "d.json",
+      JSON.stringify({ secretFile: NodePath.join(dir, "absent-secret") }),
+      0o600,
+    );
+    await expect(
+      loadProtectedSocketConfig({ configPath: missing, baseDir: dir }),
+    ).rejects.toMatchObject({ problem: "secret-file-unreadable", cause: { code: "ENOENT" } });
   });
 });

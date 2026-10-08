@@ -37,6 +37,74 @@ export interface ProtectedSocketConfig {
   readonly secret: string;
 }
 
+const ProtectedSocketConfigProblem = Schema.Literals([
+  "config-unreadable",
+  "config-not-json",
+  "secret-file-unnamed",
+  "secret-file-relative",
+  "secret-file-unreadable",
+  "secret-file-not-regular",
+  "secret-file-exposed",
+  "secret-file-foreign",
+  "secret-too-short",
+  "socket-path-invalid",
+]);
+type ProtectedSocketConfigProblem = typeof ProtectedSocketConfigProblem.Type;
+
+const CONFIG_PROBLEMS: Record<ProtectedSocketConfigProblem, string> = {
+  "config-unreadable": "the config file could not be read.",
+  "config-not-json": "the config file is not JSON.",
+  "secret-file-unnamed": "the config must name a secretFile.",
+  "secret-file-relative": "secretFile must be an absolute path.",
+  "secret-file-unreadable": "secretFile could not be read.",
+  "secret-file-not-regular": "secretFile must be a regular file.",
+  "secret-file-exposed":
+    "secretFile must not be readable or writable by group or others (chmod 600).",
+  "secret-file-foreign": "secretFile must belong to the user running T3.",
+  "secret-too-short": `the secret must be at least ${String(MIN_SECRET_LENGTH)} characters.`,
+  "socket-path-invalid": "socketPath must be an absolute path.",
+};
+
+/** A present but unsafe or malformed opt-in config; the socket stays off. */
+class ProtectedSocketConfigError extends Schema.TaggedError<ProtectedSocketConfigError>()(
+  "ProtectedSocketConfigError",
+  {
+    configPath: Schema.String,
+    problem: ProtectedSocketConfigProblem,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Invalid protected authentication config ${this.configPath}: ${CONFIG_PROBLEMS[this.problem]}`;
+  }
+}
+
+const isProtectedSocketConfigError = Schema.is(ProtectedSocketConfigError);
+
+/** The socket could not be served at its path. */
+class ProtectedSocketStartError extends Schema.TaggedError<ProtectedSocketStartError>()(
+  "ProtectedSocketStartError",
+  {
+    socketPath: Schema.String,
+    problem: Schema.Literals(["path-occupied", "listen-failed"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.problem === "path-occupied"
+      ? `${this.socketPath} exists and is not a socket.`
+      : `Failed to serve the protected authentication socket at ${this.socketPath}.`;
+  }
+}
+
+const isProtectedSocketStartError = Schema.is(ProtectedSocketStartError);
+
+/** A Node errno code such as ENOENT; safe to log, unlike an error's message. */
+const errnoCode = (cause: unknown) => {
+  const code = typeof cause === "object" && cause !== null && "code" in cause ? cause.code : null;
+  return typeof code === "string" ? code : undefined;
+};
+
 /** A protocol failure; `code` is all the client learns. */
 class RequestError extends Schema.TaggedError<RequestError>()("ProtectedSocketRequestError", {
   code: Schema.Literals(["bad-request", "unavailable"]),
@@ -93,7 +161,11 @@ export const serveProtectedHost = async (
 ): Promise<{ readonly close: () => Promise<void> }> => {
   const stale = await NodeFSP.lstat(config.socketPath).catch(() => null);
   if (stale?.isSocket()) await NodeFSP.rm(config.socketPath);
-  else if (stale) throw new Error(`${config.socketPath} exists and is not a socket.`);
+  else if (stale)
+    throw new ProtectedSocketStartError({
+      socketPath: config.socketPath,
+      problem: "path-occupied",
+    });
   const connections = new Set<NodeNet.Socket>();
   const server = NodeNet.createServer((socket) => {
     connections.add(socket);
@@ -255,29 +327,43 @@ export const loadProtectedSocketConfig = async (input: {
   readonly configPath: string;
   readonly baseDir: string;
 }): Promise<ProtectedSocketConfig | null> => {
+  const fail = (problem: ProtectedSocketConfigProblem, cause?: unknown) =>
+    new ProtectedSocketConfigError({
+      configPath: input.configPath,
+      problem,
+      ...(cause === undefined ? {} : { cause }),
+    });
   const raw = await NodeFSP.readFile(input.configPath, "utf8").catch((cause: unknown) => {
-    if ((cause as { code?: unknown }).code === "ENOENT") return null;
-    throw cause;
+    if (errnoCode(cause) === "ENOENT") return null;
+    throw fail("config-unreadable", cause);
   });
   if (raw === null) return null;
-  const parsed: unknown = JSON.parse(raw);
-  if (!isRecord(parsed) || typeof parsed.secretFile !== "string")
-    throw new Error(`${input.configPath} must name a secretFile.`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (cause) {
+    throw fail("config-not-json", cause);
+  }
+  if (!isRecord(parsed) || typeof parsed.secretFile !== "string") throw fail("secret-file-unnamed");
   if (parsed.socketPath !== undefined && typeof parsed.socketPath !== "string")
-    throw new Error(`${input.configPath} has an invalid socketPath.`);
+    throw fail("socket-path-invalid");
   const secretFile = parsed.secretFile;
-  if (!NodePath.isAbsolute(secretFile)) throw new Error("secretFile must be an absolute path.");
-  const stat = await NodeFSP.stat(secretFile);
-  if (!stat.isFile()) throw new Error("secretFile must be a regular file.");
-  if ((stat.mode & 0o077) !== 0)
-    throw new Error("secretFile must not be readable or writable by group or others (chmod 600).");
+  if (!NodePath.isAbsolute(secretFile)) throw fail("secret-file-relative");
+  const stat = await NodeFSP.stat(secretFile).catch((cause: unknown) => {
+    throw fail("secret-file-unreadable", cause);
+  });
+  if (!stat.isFile()) throw fail("secret-file-not-regular");
+  if ((stat.mode & 0o077) !== 0) throw fail("secret-file-exposed");
   if (typeof process.getuid === "function" && stat.uid !== process.getuid())
-    throw new Error("secretFile must belong to the user running T3.");
-  const secret = (await NodeFSP.readFile(secretFile, "utf8")).trim();
-  if (secret.length < MIN_SECRET_LENGTH)
-    throw new Error(`The secret must be at least ${String(MIN_SECRET_LENGTH)} characters.`);
+    throw fail("secret-file-foreign");
+  const secret = (
+    await NodeFSP.readFile(secretFile, "utf8").catch((cause: unknown) => {
+      throw fail("secret-file-unreadable", cause);
+    })
+  ).trim();
+  if (secret.length < MIN_SECRET_LENGTH) throw fail("secret-too-short");
   const socketPath = parsed.socketPath ?? NodePath.join(input.baseDir, SOCKET_FILE);
-  if (!NodePath.isAbsolute(socketPath)) throw new Error("socketPath must be an absolute path.");
+  if (!NodePath.isAbsolute(socketPath)) throw fail("socket-path-invalid");
   return { socketPath, secret };
 };
 
@@ -288,19 +374,34 @@ export const layer = Layer.effectDiscard(
     const env = yield* HostProcessEnvironment;
     const browser = yield* ServerBrowser.ServerBrowser;
     const configPath = env[CONFIG_ENV] ?? NodePath.join(config.baseDir, CONFIG_FILE);
-    const loaded = yield* Effect.tryPromise(() =>
-      loadProtectedSocketConfig({ configPath, baseDir: config.baseDir }),
-    ).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("Protected authentication socket stays off: invalid config.", {
-          configPath,
-          cause: cause.cause instanceof Error ? cause.cause.message : String(cause.cause),
-        }).pipe(Effect.as(null)),
-      ),
+    const loaded = yield* Effect.tryPromise({
+      try: () => loadProtectedSocketConfig({ configPath, baseDir: config.baseDir }),
+      catch: (cause) =>
+        isProtectedSocketConfigError(cause)
+          ? cause
+          : new ProtectedSocketConfigError({ configPath, problem: "config-unreadable", cause }),
+    }).pipe(
+      Effect.catchTags({
+        ProtectedSocketConfigError: (error) =>
+          Effect.logWarning("Protected authentication socket stays off: invalid config.", {
+            configPath,
+            cause: error.message,
+          }).pipe(Effect.as(null)),
+      }),
     );
     if (loaded === null) return;
     yield* Effect.acquireRelease(
-      Effect.tryPromise(() => serveProtectedHost(browser.protectedHost, loaded)),
+      Effect.tryPromise({
+        try: () => serveProtectedHost(browser.protectedHost, loaded),
+        catch: (cause) =>
+          isProtectedSocketStartError(cause)
+            ? cause
+            : new ProtectedSocketStartError({
+                socketPath: loaded.socketPath,
+                problem: "listen-failed",
+                cause,
+              }),
+      }),
       (served) => Effect.promise(() => served.close()),
     ).pipe(
       Effect.tap(() =>
@@ -308,12 +409,13 @@ export const layer = Layer.effectDiscard(
           socketPath: loaded.socketPath,
         }),
       ),
-      Effect.catch((cause) =>
-        Effect.logWarning("Protected authentication socket failed to start.", {
-          socketPath: loaded.socketPath,
-          cause: String(cause.cause),
-        }),
-      ),
+      Effect.catchTags({
+        ProtectedSocketStartError: (error) =>
+          Effect.logWarning("Protected authentication socket failed to start.", {
+            socketPath: loaded.socketPath,
+            cause: String(error.cause ?? error.message),
+          }),
+      }),
     );
   }),
 );
