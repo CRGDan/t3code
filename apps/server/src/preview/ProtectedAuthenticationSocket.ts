@@ -14,10 +14,11 @@ import * as NodePath from "node:path";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import {
-  ProtectedHostError,
+  isProtectedHostError,
   type ProtectedFormTarget,
   type ProtectedHost,
   type ProtectedInterval,
@@ -37,15 +38,16 @@ export interface ProtectedSocketConfig {
 }
 
 /** A protocol failure; `code` is all the client learns. */
-class RequestError extends Error {
-  readonly code: string;
-  constructor(code: string) {
-    super(code);
-    this.code = code;
+class RequestError extends Schema.TaggedError<RequestError>()("ProtectedSocketRequestError", {
+  code: Schema.Literals(["bad-request", "unavailable"]),
+}) {
+  override get message(): string {
+    return `Protected authentication request failed: ${this.code}`;
   }
 }
 
-const badRequest = () => new RequestError("bad-request");
+const isRequestError = Schema.is(RequestError);
+const badRequest = () => new RequestError({ code: "bad-request" });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -146,7 +148,7 @@ const handleConnection = (host: ProtectedHost, secret: string, socket: NodeNet.S
         });
         if (socket.destroyed) {
           await interval.end();
-          throw new RequestError("unavailable");
+          throw new RequestError({ code: "unavailable" });
         }
         const id = `i${String(++sequence)}`;
         intervals.set(id, interval);
@@ -215,10 +217,7 @@ const handleConnection = (host: ProtectedHost, secret: string, socket: NodeNet.S
       try {
         send({ id, ok: true, result: await dispatch(request) });
       } catch (cause) {
-        const code =
-          cause instanceof ProtectedHostError || cause instanceof RequestError
-            ? cause.code
-            : "failed";
+        const code = isProtectedHostError(cause) || isRequestError(cause) ? cause.code : "failed";
         send({ id, ok: false, code });
       }
     })();

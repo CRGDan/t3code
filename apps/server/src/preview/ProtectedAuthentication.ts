@@ -13,6 +13,7 @@
  */
 import * as NodeCrypto from "node:crypto";
 
+import * as Schema from "effect/Schema";
 import type { ElementHandle, Frame, Page, Request } from "playwright-core";
 
 /** How long an unused grant stays redeemable. */
@@ -20,29 +21,34 @@ export const GRANT_TTL_MS = 60_000;
 /** The longest a single interval may hold a tab, whatever deadline the client asks for. */
 export const MAX_INTERVAL_MS = 180_000;
 
-export type ProtectedHostErrorCode =
-  | "grant-invalid"
-  | "tab-not-found"
-  | "tab-closed"
-  | "tab-not-owned"
-  | "busy"
-  | "navigated"
-  | "target-missing"
-  | "target-not-editable"
-  | "timeout"
-  | "unavailable"
-  | "failed";
+const ProtectedHostErrorCode = Schema.Literals([
+  "grant-invalid",
+  "tab-not-found",
+  "tab-closed",
+  "tab-not-owned",
+  "busy",
+  "navigated",
+  "target-missing",
+  "target-not-editable",
+  "timeout",
+  "unavailable",
+  "failed",
+]);
 
-/** A host failure with a code and nothing else. */
-export class ProtectedHostError extends Error {
-  readonly code: ProtectedHostErrorCode;
-
-  constructor(code: ProtectedHostErrorCode) {
-    super(`Protected authentication failed: ${code}`);
-    this.name = "ProtectedHostError";
-    this.code = code;
+/**
+ * A host failure with a code and nothing else. It keeps no `cause`: the
+ * underlying Playwright error can quote page content.
+ */
+export class ProtectedHostError extends Schema.TaggedError<ProtectedHostError>()(
+  "ProtectedHostError",
+  { code: ProtectedHostErrorCode },
+) {
+  override get message(): string {
+    return `Protected authentication failed: ${this.code}`;
   }
 }
+
+export const isProtectedHostError = Schema.is(ProtectedHostError);
 
 export interface GrantClaim {
   readonly threadId: string;
@@ -60,7 +66,7 @@ export interface ProtectedFormTarget {
  * Where submitting the target's form would go: the lowercased method and the
  * resolved absolute action, with a submit button's own overrides applied.
  */
-export interface ProtectedFormSubmission {
+interface ProtectedFormSubmission {
   readonly method: string;
   readonly action: string;
 }
@@ -142,7 +148,8 @@ export class GrantRegistry {
     const key = digest(grant);
     const entry = this.grants.get(key);
     this.grants.delete(key);
-    if (!entry || entry.expiresAt <= this.now()) throw new ProtectedHostError("grant-invalid");
+    if (!entry || entry.expiresAt <= this.now())
+      throw new ProtectedHostError({ code: "grant-invalid" });
     return { threadId: entry.threadId, tabId: entry.tabId, agentSessionId: entry.agentSessionId };
   }
 }
@@ -262,10 +269,10 @@ export const withEditableTarget = async <A>(
   run: (handle: ElementHandle) => Promise<A>,
 ): Promise<A> => {
   const found = await resolveTarget(page, target);
-  if (!found) throw new ProtectedHostError("target-missing");
+  if (!found) throw new ProtectedHostError({ code: "target-missing" });
   try {
     if (!(await describe(found.handle)).editable)
-      throw new ProtectedHostError("target-not-editable");
+      throw new ProtectedHostError({ code: "target-not-editable" });
     return await run(found.handle);
   } finally {
     await found.handle.dispose().catch(() => undefined);
@@ -289,7 +296,7 @@ export const submitTarget = async (
   timeout: () => number,
 ) => {
   const found = await resolveTarget(page, target);
-  if (!found) throw new ProtectedHostError("target-missing");
+  if (!found) throw new ProtectedHostError({ code: "target-missing" });
   const before = pageVersion();
   // A navigation request in flight keeps the wait going past the settle window.
   const navigation = { inFlight: false };
@@ -305,7 +312,7 @@ export const submitTarget = async (
     await found.handle.click({ timeout: Math.max(1, timeout()) });
     const settleBy = Date.now() + SUBMIT_SETTLE_MS;
     while (pageVersion() === before && (navigation.inFlight || Date.now() < settleBy)) {
-      if (timeout() <= 0) throw new ProtectedHostError("timeout");
+      if (timeout() <= 0) throw new ProtectedHostError({ code: "timeout" });
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await page.waitForLoadState("load", { timeout: Math.max(1, timeout()) });
@@ -330,7 +337,7 @@ export const readTargetText = async (page: Page, target: ProtectedFormTarget) =>
 export const fetchFromContext = async (page: Page, url: string, timeout: number) => {
   const parsed = URL.parse(url);
   if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:"))
-    throw new ProtectedHostError("failed");
+    throw new ProtectedHostError({ code: "failed" });
   const response = await page
     .context()
     .request.get(parsed.href, { failOnStatusCode: false, maxRedirects: 10, timeout });
@@ -350,14 +357,14 @@ export const toHostError = (
   cause: unknown,
   state: { readonly open: boolean; readonly closed: boolean },
 ) =>
-  cause instanceof ProtectedHostError
+  isProtectedHostError(cause)
     ? cause
-    : new ProtectedHostError(
-        !state.open
+    : new ProtectedHostError({
+        code: !state.open
           ? "timeout"
           : state.closed
             ? "tab-closed"
             : cause instanceof Error && cause.name === "TimeoutError"
               ? "timeout"
               : "failed",
-      );
+      });

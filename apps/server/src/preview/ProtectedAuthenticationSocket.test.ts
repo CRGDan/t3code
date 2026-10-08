@@ -26,7 +26,7 @@ let ended = 0;
 /** Records what the host was asked to do; values go to `filledValues` only. */
 const fakeHost: ProtectedHost = {
   begin: async ({ grant, deadline }) => {
-    if (grant !== GOOD_GRANT) throw new ProtectedHostError("grant-invalid");
+    if (grant !== GOOD_GRANT) throw new ProtectedHostError({ code: "grant-invalid" });
     calls.push(`begin ${String(deadline)}`);
     const interval: ProtectedInterval = {
       contextId: "context-1",
@@ -50,7 +50,7 @@ const fakeHost: ProtectedHost = {
         };
       },
       fill: async (target, value, expected) => {
-        if (expected.pageVersion !== 3) throw new ProtectedHostError("navigated");
+        if (expected.pageVersion !== 3) throw new ProtectedHostError({ code: "navigated" });
         calls.push(`fill ${target.selector}`);
         filledValues.push(value);
       },

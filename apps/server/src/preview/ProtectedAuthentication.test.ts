@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { GrantRegistry, ProtectedHostError } from "./ProtectedAuthentication.ts";
+import { GrantRegistry, isProtectedHostError } from "./ProtectedAuthentication.ts";
 
 const claim = { threadId: "thread", tabId: "tab", agentSessionId: "env\0agent" };
 
@@ -9,7 +9,7 @@ const code = (run: () => unknown) => {
     run();
     return null;
   } catch (error) {
-    return error instanceof ProtectedHostError ? error.code : String(error);
+    return isProtectedHostError(error) ? error.code : String(error);
   }
 };
 

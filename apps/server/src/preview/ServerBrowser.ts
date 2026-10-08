@@ -2276,13 +2276,13 @@ const make = Effect.gen(function* () {
   const beginProtected: Protected.ProtectedHost["begin"] = async (input) => {
     const claim = grants.redeem(input.grant);
     if (input.tabId !== undefined && input.tabId !== claim.tabId)
-      throw new Protected.ProtectedHostError("grant-invalid");
+      throw new Protected.ProtectedHostError({ code: "grant-invalid" });
     const tab = tabs.get(tabKey(claim.threadId, claim.tabId));
     if (!tab || tab.closing || tab.page.isClosed())
-      throw new Protected.ProtectedHostError("tab-closed");
+      throw new Protected.ProtectedHostError({ code: "tab-closed" });
     if (tab.control.agentId !== claim.agentSessionId)
-      throw new Protected.ProtectedHostError("tab-not-owned");
-    if (tab.desktop) throw new Protected.ProtectedHostError("unavailable");
+      throw new Protected.ProtectedHostError({ code: "tab-not-owned" });
+    if (tab.desktop) throw new Protected.ProtectedHostError({ code: "unavailable" });
     const context = tab.page.context();
     const members = () =>
       [...tabs.values()].filter((member) => !member.desktop && member.page.context() === context);
@@ -2290,10 +2290,10 @@ const make = Effect.gen(function* () {
       protectedContexts.has(context) ||
       members().some((member) => member.control.controller !== null || member.dialog !== null)
     )
-      throw new Protected.ProtectedHostError("busy");
+      throw new Protected.ProtectedHostError({ code: "busy" });
     const until = Math.min(input.deadline, Date.now() + Protected.MAX_INTERVAL_MS);
     const remaining = () => until - Date.now();
-    if (remaining() <= 0) throw new Protected.ProtectedHostError("timeout");
+    if (remaining() <= 0) throw new Protected.ProtectedHostError({ code: "timeout" });
     const contextId = contextIds.get(context) ?? NodeCrypto.randomUUID();
     contextIds.set(context, contextId);
 
@@ -2337,7 +2337,7 @@ const make = Effect.gen(function* () {
           member === tab
             ? member.control.agent(claim.agentSessionId, hold)
             : member.control.system(hold);
-        const refused = () => entered.reject(new Protected.ProtectedHostError("busy"));
+        const refused = () => entered.reject(new Protected.ProtectedHostError({ code: "busy" }));
         queued.then(refused, refused);
         entered.promise.catch(constVoid);
         return entered.promise;
@@ -2347,7 +2347,7 @@ const make = Effect.gen(function* () {
         Promise.all(entries),
         new Promise((_, reject) => {
           entryTimer = setTimeout(
-            () => reject(new Protected.ProtectedHostError("timeout")),
+            () => reject(new Protected.ProtectedHostError({ code: "timeout" })),
             remaining(),
           );
         }),
@@ -2359,9 +2359,9 @@ const make = Effect.gen(function* () {
 
     const step = <A>(run: () => Promise<A>): Promise<A> => {
       const result = chain.then(async () => {
-        if (!open) throw new Protected.ProtectedHostError("timeout");
+        if (!open) throw new Protected.ProtectedHostError({ code: "timeout" });
         if (tab.closing || tab.page.isClosed())
-          throw new Protected.ProtectedHostError("tab-closed");
+          throw new Protected.ProtectedHostError({ code: "tab-closed" });
         try {
           return await run();
         } catch (cause) {
@@ -2376,7 +2376,7 @@ const make = Effect.gen(function* () {
     };
     const checkVersion = (expected: { readonly pageVersion: number }) => {
       if (tab.pageVersion !== expected.pageVersion)
-        throw new Protected.ProtectedHostError("navigated");
+        throw new Protected.ProtectedHostError({ code: "navigated" });
     };
     // A failed fill or submit leaves no value behind.
     const clearOnFailure = async (run: () => Promise<void>) => {
