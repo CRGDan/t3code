@@ -22,6 +22,8 @@ let served: { close: () => Promise<void> } | null = null;
 const calls: Array<string> = [];
 const filledValues: Array<string> = [];
 let ended = 0;
+/** Resolves on the first `end` call of a test. */
+let firstEnd = Promise.withResolvers<void>();
 
 /** Records what the host was asked to do; values go to `filledValues` only. */
 const fakeHost: ProtectedHost = {
@@ -60,6 +62,7 @@ const fakeHost: ProtectedHost = {
       fetchText: async () => ({ status: 200, body: "{}" }),
       end: async () => {
         ended += 1;
+        firstEnd.resolve();
       },
     };
     return interval;
@@ -109,6 +112,7 @@ beforeEach(async () => {
   calls.length = 0;
   filledValues.length = 0;
   ended = 0;
+  firstEnd = Promise.withResolvers<void>();
   served = await serveProtectedHost(fakeHost, { socketPath, secret: SECRET });
 });
 
@@ -242,7 +246,7 @@ describe("serveProtectedHost", () => {
     await client.request({ op: "begin", grant: GOOD_GRANT, deadline: 5_000 });
     client.socket.destroy();
     await client.closed;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await firstEnd.promise;
     expect(ended).toBe(1);
   });
 });
