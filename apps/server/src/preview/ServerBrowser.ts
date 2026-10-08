@@ -473,6 +473,20 @@ const make = Effect.gen(function* () {
         "protected",
       );
   };
+  /** Keeps a console or network entry; a protected interval leaves none. */
+  const recordEvidence = <A>(tab: ServerTab, entries: Array<A>, entry: A) => {
+    if (!isProtected(tab)) pushBounded(entries, entry);
+  };
+  /** Acknowledges and drops a protected tab's screencast frame; true when dropped. */
+  const dropProtectedFrame = (
+    tab: ServerTab,
+    session: CDPSession,
+    frame: { readonly sessionId: number },
+  ) => {
+    if (!isProtected(tab)) return false;
+    void session.send("Page.screencastFrameAck", { sessionId: frame.sessionId }).catch(constVoid);
+    return true;
+  };
 
   const contexts = new ServerBrowserContexts({
     profilesDir: NodePath.join(config.stateDir, "server-browser", "profiles"),
@@ -801,15 +815,14 @@ const make = Effect.gen(function* () {
     });
     page.on("requestfailed", (request) => {
       const errorText = request.failure()?.errorText ?? "";
-      if (!isProtected(tab))
-        pushBounded(tab.networkEntries, {
-          url: request.url(),
-          method: request.method(),
-          status: null,
-          failed: true,
-          errorText,
-          timestamp: new Date().toISOString(),
-        });
+      recordEvidence(tab, tab.networkEntries, {
+        url: request.url(),
+        method: request.method(),
+        status: null,
+        failed: true,
+        errorText,
+        timestamp: new Date().toISOString(),
+      });
       if (!isMainNavigation(request) || errorText.includes("ERR_ABORTED")) return;
       tab.loading = false;
       const { code, description } = ServerBrowserPage.parseNetError(errorText);
@@ -821,10 +834,8 @@ const make = Effect.gen(function* () {
         description,
       });
     });
-    // Protected intervals leave no console or network evidence.
     page.on("response", (response) => {
-      if (isProtected(tab)) return;
-      pushBounded(tab.networkEntries, {
+      recordEvidence(tab, tab.networkEntries, {
         url: response.url(),
         method: response.request().method(),
         status: response.status(),
@@ -833,8 +844,7 @@ const make = Effect.gen(function* () {
       });
     });
     page.on("console", (message) => {
-      if (isProtected(tab)) return;
-      pushBounded(tab.consoleEntries, {
+      recordEvidence(tab, tab.consoleEntries, {
         level: message.type(),
         text: message.text().slice(0, 2_000),
         timestamp: new Date().toISOString(),
@@ -1261,12 +1271,7 @@ const make = Effect.gen(function* () {
         session = opened;
         const framesInFlight = new Set<Promise<void>>();
         opened.on("Page.screencastFrame", (frame) => {
-          if (isProtected(tab)) {
-            void opened
-              .send("Page.screencastFrameAck", { sessionId: frame.sessionId })
-              .catch(constVoid);
-            return;
-          }
+          if (dropProtectedFrame(tab, opened, frame)) return;
           const cssWidth = tab.page.viewportSize()?.width ?? frame.metadata.deviceWidth;
           const delivered: Promise<void> = encoder
             .evaluate(
@@ -2092,12 +2097,7 @@ const make = Effect.gen(function* () {
       );
       let screencastStarted = false;
       session.on("Page.screencastFrame", (frame) => {
-        if (isProtected(tab)) {
-          void session
-            .send("Page.screencastFrameAck", { sessionId: frame.sessionId })
-            .catch(constVoid);
-          return;
-        }
+        if (dropProtectedFrame(tab, session, frame)) return;
         screencastStarted = true;
         if (framesInFlight > 0) mayHaveDropped = true;
         framesInFlight += 1;
