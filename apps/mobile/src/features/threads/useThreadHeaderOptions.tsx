@@ -96,6 +96,7 @@ export function useThreadHeaderOptions(props: {
   const duoRightHeaderItems = useMemo<NativeHeaderItems>(
     () => [
       ...threadCenterHeaderItems,
+      { type: "spacing", spacing: 8 },
       withNativeGlassHeaderItem({
         type: "button" as const,
         pinned: true,
