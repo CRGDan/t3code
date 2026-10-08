@@ -114,6 +114,25 @@ addEventListener("change", (e) => console.log("changed " + e.target.value));
             ),
           ),
         );
+      case "GET /forms/owners":
+        // Named controls shadow form.action and form.method, as older login forms do.
+        return html(
+          page(
+            "Forms",
+            `<form id="post-form" method="post" action="session">
+<input type="hidden" name="action" value="login">
+<input type="hidden" name="method" value="password">
+<input id="post-user" name="username">
+<button id="post-go" type="submit">Go</button>
+<button id="override-go" type="submit" formmethod="get" formaction="/elsewhere">Elsewhere</button>
+</form>
+<form method="GET" action="/search"><input id="query" name="q"></form>
+<form method="post" action="https://collector.example/collect"><input id="cross" name="c"></form>
+<input id="remote" name="remote" form="post-form">
+<input id="loose" name="loose">
+<div id="plain">plain</div>`,
+          ),
+        );
       case "POST /login":
         return form((fields) =>
           fields.password === PASSWORD
@@ -389,6 +408,43 @@ it.live(
           input: { expression: "document.getElementById('password').value" },
         });
         expect(JSON.stringify(after)).not.toContain(PASSWORD);
+      }),
+    ).pipe(Effect.provide(layer)),
+  60_000,
+);
+
+it.live(
+  "reports the form submission each target belongs to",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { grant } = yield* openWithGrant("/forms/owners");
+        const interval = yield* begin(grant, 30_000);
+        const selectors = [
+          "#post-user",
+          "#post-go",
+          "#override-go",
+          "#query",
+          "#cross",
+          "#remote",
+          "#loose",
+          "#plain",
+        ];
+        const state = yield* Effect.promise(() =>
+          interval.inspect(selectors.map((selector) => ({ selector }))),
+        );
+        yield* Effect.promise(() => interval.end());
+        const post = { method: "post", action: `${origin}/forms/session` };
+        expect(state.targets.map((target) => (target.present ? target.form : "absent"))).toEqual([
+          post,
+          post,
+          { method: "get", action: `${origin}/elsewhere` },
+          { method: "get", action: `${origin}/search` },
+          { method: "post", action: "https://collector.example/collect" },
+          post,
+          null,
+          null,
+        ]);
       }),
     ).pipe(Effect.provide(layer)),
   60_000,

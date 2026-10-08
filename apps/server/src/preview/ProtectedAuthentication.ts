@@ -56,6 +56,15 @@ export interface ProtectedFormTarget {
   readonly frame?: string | undefined;
 }
 
+/**
+ * Where submitting the target's form would go: the lowercased method and the
+ * resolved absolute action, with a submit button's own overrides applied.
+ */
+export interface ProtectedFormSubmission {
+  readonly method: string;
+  readonly action: string;
+}
+
 export type ProtectedTargetState =
   | { readonly present: false }
   | {
@@ -63,6 +72,8 @@ export type ProtectedTargetState =
       readonly frameUrl: string;
       readonly editable: boolean;
       readonly inputType?: string;
+      /** Null when the element has no form owner. */
+      readonly form: ProtectedFormSubmission | null;
     };
 
 export interface ProtectedPageState {
@@ -186,15 +197,46 @@ const describe = (handle: ElementHandle) =>
         readonly type?: string;
         readonly disabled?: boolean;
         readonly readOnly?: boolean;
+        readonly form?: object | null;
+        readonly formMethod?: string;
+        readonly formAction?: string;
+        readonly hasAttribute: (name: string) => boolean;
       };
       const tag = element.tagName.toLowerCase();
       const type = tag === "input" ? String(element.type).toLowerCase() : undefined;
+      // `form` honours the form= attribute. Read the owner through the prototype's
+      // getters: a control named "action" or "method" shadows the form's own property.
+      const owner = element.form ?? null;
+      const formProperty = (name: "method" | "action") =>
+        String(
+          Object.getOwnPropertyDescriptor(
+            (globalThis as unknown as { HTMLFormElement: { prototype: object } }).HTMLFormElement
+              .prototype,
+            name,
+          )?.get?.call(owner),
+        );
+      const submitter =
+        (tag === "button" && element.type === "submit") || type === "submit" || type === "image";
+      const form =
+        owner === null
+          ? null
+          : {
+              method:
+                submitter && element.hasAttribute("formmethod")
+                  ? String(element.formMethod)
+                  : formProperty("method"),
+              action:
+                submitter && element.hasAttribute("formaction")
+                  ? String(element.formAction)
+                  : formProperty("action"),
+            };
       return {
         editable:
           (tag === "textarea" || (type !== undefined && !nonText.includes(type))) &&
           element.disabled !== true &&
           element.readOnly !== true,
         ...(type === undefined ? {} : { inputType: type }),
+        form,
       };
     },
     [...NON_TEXT_INPUTS],
