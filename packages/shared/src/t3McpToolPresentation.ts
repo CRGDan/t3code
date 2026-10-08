@@ -235,6 +235,11 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "browser",
     "browser",
   ),
+  preview_authentication_grant: tool(
+    ["Grant", "Granting", "Granted", "authentication for the preview browser"],
+    "browser",
+    "browser",
+  ),
   device_list: tool(["List", "Listing", "Listed", "simulators and emulators"], "device", "device"),
   device_open: tool(
     ["Open", "Opening", "Opened", "a device in the Device panel"],

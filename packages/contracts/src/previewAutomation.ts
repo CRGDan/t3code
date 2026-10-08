@@ -720,14 +720,14 @@ export const PreviewAutomationRecordingStatus = Schema.Struct({
 });
 export type PreviewAutomationRecordingStatus = typeof PreviewAutomationRecordingStatus.Type;
 
+const authenticationTabDescription =
+  "The collaborative browser tab you own and want authenticated, from preview_open or preview_status tabs.";
 export const PreviewAutomationAuthenticationGrantInput = Schema.Struct({
-  tabId: PreviewTabId.annotate({
-    description:
-      "The collaborative browser tab you own and want authenticated, from preview_open or preview_status tabs.",
-  }).annotateKey({
-    description:
-      "The collaborative browser tab you own and want authenticated, from preview_open or preview_status tabs.",
-  }),
+  // Like DescribedLocator: a JSON schema keeps only the description on the last check.
+  tabId: Schema.String.check(Schema.isTrimmed())
+    .check(Schema.isNonEmpty())
+    .check(Schema.isMaxLength(128, { description: authenticationTabDescription }))
+    .annotateKey({ description: authenticationTabDescription }),
 });
 export type PreviewAutomationAuthenticationGrantInput =
   typeof PreviewAutomationAuthenticationGrantInput.Type;

@@ -1,6 +1,8 @@
 import {
   OrchestratorMcpFailure,
   ToolActivityIcon,
+  PreviewAutomationAuthenticationGrant,
+  PreviewAutomationAuthenticationGrantInput,
   PreviewAutomationClickInput,
   PreviewAutomationDialogInput,
   PreviewAutomationDragInput,
@@ -311,6 +313,20 @@ const PreviewRecordingStopTool = safeBrowserTool(
   }).annotate(Tool.Title, "Stop browser recording"),
 );
 
+const PreviewAuthenticationGrantTool = safeBrowserTool(
+  Tool.make("preview_authentication_grant", {
+    description:
+      "Mint a short-lived, single-use grant to authenticate the collaborative browser tab you own, selected by tabId. Pass the grant unchanged to the credential service's browser authentication tool; T3 never learns which credential it uses. While the service signs in, the tab and every tab sharing its storage refuse other preview tools with reason protected.",
+    parameters: PreviewAutomationAuthenticationGrantInput,
+    success: Schema.Struct({
+      ...PreviewAutomationAuthenticationGrant.fields,
+      ...presentationFields,
+    }),
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Grant browser authentication"),
+);
+
 export const PreviewToolkit = Toolkit.make(
   PreviewDialogTool,
   PreviewStatusTool,
@@ -331,6 +347,7 @@ export const PreviewToolkit = Toolkit.make(
   PreviewWaitForTool,
   PreviewRecordingStartTool,
   PreviewRecordingStopTool,
+  PreviewAuthenticationGrantTool,
 );
 
 export const PreviewStandardToolkit = Toolkit.make(
@@ -352,6 +369,7 @@ export const PreviewStandardToolkit = Toolkit.make(
   PreviewWaitForTool,
   PreviewRecordingStartTool,
   PreviewRecordingStopTool,
+  PreviewAuthenticationGrantTool,
 );
 
 export const PreviewSnapshotToolkit = Toolkit.make(PreviewSnapshotTool);

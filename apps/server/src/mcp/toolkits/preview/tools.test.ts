@@ -1,7 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import { Tool } from "effect/ai";
 
-import { PreviewToolkit } from "./tools.ts";
+import { PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
 
 const schemaHasDescription = (schema: unknown): boolean => {
   if (!schema || typeof schema !== "object") return false;
@@ -75,6 +75,22 @@ it("exports exact object result schemas for preview actions", () => {
       properties: { toolIcon: expect.any(Object) },
       additionalProperties: true,
       description: "The preview action completed successfully.",
+    });
+  }
+});
+
+it("offers a protected-authentication grant for an explicit tab in both toolkits", () => {
+  for (const toolkit of [PreviewToolkit, PreviewStandardToolkit]) {
+    const tool = (toolkit.tools as Record<string, Tool.Any>)["preview_authentication_grant"];
+    expect(tool, "preview_authentication_grant").toBeDefined();
+    const schema = Tool.getJsonSchema(tool!) as { readonly required?: ReadonlyArray<string> };
+    expect(schema.required).toEqual(["tabId"]);
+    expect(Tool.getJsonSchemaFromSchema(tool!.successSchema)).toMatchObject({
+      properties: {
+        grant: expect.any(Object),
+        tabId: expect.any(Object),
+        expiresAt: expect.any(Object),
+      },
     });
   }
 });

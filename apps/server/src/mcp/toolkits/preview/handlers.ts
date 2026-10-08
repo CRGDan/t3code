@@ -16,6 +16,7 @@ import {
   type PreviewAutomationSelectResult,
   type PreviewAutomationSetColorSchemeResult,
   type PreviewAutomationSnapshot,
+  type PreviewAutomationAuthenticationGrant,
   type PreviewAutomationStatus,
   type PreviewTabId,
 } from "@t3tools/contracts";
@@ -260,6 +261,9 @@ const handlers = {
       const artifact = yield* claimPreviewRecording(scope.thread.threadId, response.result);
       return { ...artifact, ...(response.toolIcon ? { toolIcon: response.toolIcon } : {}) };
     }),
+  ),
+  preview_authentication_grant: McpToolAccess.actsAsCaller((input) =>
+    invokeTargeted<PreviewAutomationAuthenticationGrant>("authenticationGrant", input),
   ),
 } satisfies McpToolAccess.Handlers<typeof PreviewToolkit.tools>;
 
