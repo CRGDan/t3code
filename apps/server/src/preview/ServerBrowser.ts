@@ -461,8 +461,8 @@ const make = Effect.gen(function* () {
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
   const grants = new Protected.GrantRegistry();
-  /** Browser contexts a protected interval holds, and how to cancel it. */
-  const protectedContexts = new Map<BrowserContext, { readonly cancel: () => Promise<void> }>();
+  /** Browser contexts a protected interval holds. */
+  const protectedContexts = new Set<BrowserContext>();
   /** Stable ids for contexts, so a credential service can tell popups share one. */
   const contextIds = new WeakMap<BrowserContext, string>();
   const isProtected = (tab: ServerTab) => protectedContexts.has(tab.page.context());
@@ -2310,7 +2310,10 @@ const make = Effect.gen(function* () {
         clearTimeout(timer);
         tab.page.off("close", onClose);
         // A running step stops at its own timeout; clear behind it, not under it.
-        await Promise.race([chain, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+        await Promise.race([
+          chain,
+          new Promise((resolve) => setTimeout(resolve, Protected.END_DRAIN_MS)),
+        ]);
         if (!tab.page.isClosed()) await Protected.clearTargets(tab.page, filled.splice(0));
         released.resolve();
         protectedContexts.delete(context);
@@ -2319,7 +2322,7 @@ const make = Effect.gen(function* () {
           if (!member.loading) void reportLoaded(member);
         }
       })());
-    protectedContexts.set(context, { cancel: finish });
+    protectedContexts.add(context);
     timer = setTimeout(() => void finish(), remaining());
     tab.page.once("close", onClose);
 

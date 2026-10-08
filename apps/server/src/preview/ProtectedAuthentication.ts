@@ -170,6 +170,8 @@ const NON_TEXT_INPUTS = new Set([
 /** How long a submit waits for its navigation to start before treating it as in-page. */
 const SUBMIT_SETTLE_MS = 1_500;
 const CLEAR_TIMEOUT_MS = 2_000;
+/** How long ending an interval waits for a running step before clearing behind it. */
+export const END_DRAIN_MS = 2_000;
 const FETCH_BODY_LIMIT = 1024 * 1024;
 
 const dispose = (handles: ReadonlyArray<ElementHandle>) =>
