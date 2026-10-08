@@ -68,7 +68,9 @@ at that path stops startup of the socket.
 If the config is present but unsafe or malformed, T3 logs a warning and keeps
 the socket off. The rest of the server starts normally.
 
-## Socket protocol `t3-protected-auth/1`
+## Socket protocol `t3-protected-auth/2`
+
+Version 2 added the required `form` key to each present `inspect` target.
 
 The protocol is newline-delimited JSON (NDJSON) over a unix stream socket. Each
 line carries one JSON object and may be at most 1 MiB.
@@ -79,7 +81,7 @@ line carries one JSON object and may be at most 1 MiB.
 { "id": 1, "op": "hello", "secret": "…" }
 ```
 
-- On success the reply is `{"id":1,"ok":true,"result":{"protocol":"t3-protected-auth/1"}}`.
+- On success the reply is `{"id":1,"ok":true,"result":{"protocol":"t3-protected-auth/2"}}`.
 - Anything else gets `{"id":…,"ok":false,"code":"unauthorized"}` and the
   connection closes.
 - The secret comparison is constant time.
@@ -125,7 +127,21 @@ A _target_ is `{"selector": css, "frame"?: css}`.
 **`inspect`**
 
 - A target state is `{present:false}` or
-  `{present:true, frameUrl, editable, inputType?}`.
+  `{present:true, frameUrl, editable, inputType?, form}`.
+- `form` is `null` when the element has no form owner (a `div`, or an input
+  outside any form and without a `form=` attribute). Otherwise it is
+  `{method, action}`, where the submission would go:
+  - `method` is the lowercased method as the DOM normalizes it: `get`, `post`
+    or `dialog`.
+  - `action` is the absolute URL, resolved against the document's base URL. An
+    empty or missing action resolves to the document URL. A cross-origin
+    action is reported as it is.
+  - The owner is the element's `form`, so a `form=` attribute counts. For a
+    submit button (`<button type=submit>`, `<input type=submit|image>`), a
+    `formmethod` or `formaction` attribute overrides the form's value.
+- T3 only reports `form`. The credential service decides whether to fill,
+  for example refusing a `get` method or an action outside its allowed
+  origins.
 - `pageVersion` changes whenever any frame of the tab navigates.
 
 **`fill`** refuses with `navigated` if `pageVersion` is stale. It accepts only
@@ -212,7 +228,13 @@ They defend against other users, not against the agents.
   host clears fields but cannot clear page memory. Use protected
   authentication only with sites you trust.
 - A login form that submits with GET puts values into the URL, and the URL
-  then appears in history, status and snapshots after the interval.
+  then appears in history, status and snapshots after the interval. `inspect`
+  reports each target's `form` so the credential service can refuse such a
+  form, or one that posts to an origin it does not allow.
+- `form` describes the page when `inspect` ran. Page script can change a
+  form's `method` or `action`, or submit the values itself with `fetch`, after
+  inspection and before or during `submit`. `pageVersion` does not change for
+  that, so T3 does not detect it.
 - Target inspection runs a small function in the page's main world, so a page
   can detect it or interfere with it.
 - On hosts without the `t3-chrome-headless-shell` AppArmor profile, T3's
