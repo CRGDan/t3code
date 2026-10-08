@@ -115,12 +115,14 @@ vp="$REPO_ROOT/node_modules/.bin/vp"
 
 say "Installing dependencies..."
 "$vp" install --frozen-lockfile
+# build-cli-archive and the build tasks spawn the worktree's own vp.
+export PATH="$work/src/node_modules/.bin:$PATH"
 say "Stamping version $label..."
 node scripts/update-release-package-versions.ts "$label"
 say "Building web client and server bundle..."
-PATH="$work/src/node_modules/.bin:$PATH" vp run --filter t3 build
+vp run --filter t3 build
 say "Building the single executable with Node $sea_node_version..."
-PATH="$sea_node_dir/bin:$work/src/node_modules/.bin:$PATH" node apps/server/scripts/cli.ts build-exe --target "$target"
+PATH="$sea_node_dir/bin:$PATH" node apps/server/scripts/cli.ts build-exe --target "$target"
 mkdir -p "$work/resource-monitor"
 cp -a "$resource_monitor_dir/." "$work/resource-monitor/"
 say "Packing the runtime archive..."
