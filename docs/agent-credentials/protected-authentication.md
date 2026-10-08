@@ -239,5 +239,22 @@ Release builds bake in T3 Connect relay config. Pass `T3CODE_RELAY_URL`,
 `T3CODE_CLERK_CLI_OAUTH_CLIENT_ID` to `build.sh`. Without them it refuses
 unless you pass `--without-relay`, and that build has no T3 Connect.
 
+Upstream's release workflow (`relay_public_config` in
+`.github/workflows/release.yml`) reads these from the production environment
+and exports them to the bundle build. The server bundle bakes in the relay
+URL, publishable key and CLI OAuth client id. The web client bakes in all
+four as `VITE_*` values. They are public client identifiers, not secrets.
+
+For `+ac.2` and later, the values were taken from the installed release
+build: `~/.t3/runtime/versions/0.0.46-nightly.20261008.2833/`. Read them
+from the `buildTimeRelayUrl`, `buildTimeClerkPublishableKey` and
+`buildTimeClerkCliOAuthClientId` assignments in `t3`. Read
+`VITE_CLERK_JWT_TEMPLATE` from the env object in `client/assets/*.js`. Pass
+them to `build.sh` as environment variables. They are not committed here.
+
+Release builds also bake in a relay tracing ingest token
+(`T3CODE_RELAY_CLIENT_OTLP_TRACES_*`). It is not a public identifier, so the
+pinned build leaves it out and sends no relay traces.
+
 Installing does not enable the socket. Creating `~/.t3/protected-auth.json` is
 a separate, deliberate step.
