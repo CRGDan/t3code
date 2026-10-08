@@ -22,6 +22,7 @@ import { HttpClient } from "effect/http";
 
 import { CLI_RELEASE_BASE_URL_ENV } from "@t3tools/shared/cliRelease";
 
+import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -36,6 +37,8 @@ import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { isExactServiceVersion, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 const PREFLIGHT_TIMEOUT = Duration.seconds(30);
+/** Build metadata the agent-credentials fork stamps on its pinned builds. */
+const PINNED_FORK_BUILD = /\+ac\.[0-9A-Za-z.-]+$/;
 
 export function resolveServerSelfUpdateCapability(input: {
   readonly desktopManaged: boolean;
@@ -169,7 +172,10 @@ export const withRunningThreadContinuation = Effect.fn(
   });
 });
 
-export const make = Effect.fn("cloud.server_self_update.make")(function* () {
+export const make = Effect.fn("cloud.server_self_update.make")(function* (
+  options: { readonly runningVersion?: string } = {},
+) {
+  const runningVersion = options.runningVersion ?? packageJson.version;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const desktopAppUpdate = yield* DesktopAppUpdate.DesktopAppUpdate;
   const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
@@ -213,6 +219,12 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       );
     }
 
+    // An upstream update would silently drop the fork's protected-authentication patch.
+    if (PINNED_FORK_BUILD.test(runningVersion)) {
+      return yield* failWith(
+        `This server runs the pinned agent-credentials build ${runningVersion}. Update or roll it back on the host with scripts/agent-credentials/install.sh or rollback.sh.`,
+      );
+    }
     const targetVersion = input.targetVersion.trim();
     if (!isExactServiceVersion(targetVersion)) {
       return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);
