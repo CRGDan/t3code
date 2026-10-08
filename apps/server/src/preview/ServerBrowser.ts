@@ -2078,16 +2078,19 @@ const make = Effect.gen(function* () {
       broadcastControl(tab);
       pushFileChooser(tab);
       // Full scale: a scaled capture would flash in every other viewer.
+      // A protected interval can begin while a still waits for the lock or renders.
       const pushStill = async () => {
         if (isProtected(tab)) return;
-        const data = await withCaptureLock(tab, () =>
-          ServerBrowserPage.captureViewport(tab.page, session, {
-            format: "jpeg",
-            quality,
-            scale: 1,
-          }),
+        const data = await withCaptureLock(tab, async () =>
+          isProtected(tab)
+            ? null
+            : ServerBrowserPage.captureViewport(tab.page, session, {
+                format: "jpeg",
+                quality,
+                scale: 1,
+              }),
         ).catch(() => null);
-        if (data)
+        if (data && !isProtected(tab))
           viewer.push({ _tag: "frame", data: Buffer.from(data, "base64"), ack: Effect.void });
       };
       let settleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2349,7 +2352,8 @@ const make = Effect.gen(function* () {
       });
       let entryTimer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
-        Promise.all(entries),
+        // A capture already holding a tab's capture lock finishes before anything is filled.
+        Promise.all([...entries, ...held.map((member) => member.captureLock)]),
         new Promise((_, reject) => {
           entryTimer = setTimeout(
             () => reject(new Protected.ProtectedHostError({ code: "timeout" })),

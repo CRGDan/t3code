@@ -65,7 +65,15 @@ function makeSession() {
     send: vi.fn(async (method: string, _input?: unknown): Promise<Record<string, unknown>> => {
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
       if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { pageX: 0, pageY: 0 } };
-      if (method === "Page.captureScreenshot") return { data: "ZnJhbWU=" };
+      if (method === "Page.captureScreenshot") {
+        const gate = captureGate;
+        if (gate) {
+          gate.started.resolve();
+          await gate.release.promise;
+          gate.events.push("captured");
+        }
+        return { data: "ZnJhbWU=" };
+      }
       return { result: { value: "evaluated" } };
     }),
   };
@@ -149,6 +157,12 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
 
 const contexts: ReturnType<typeof makeContext>[] = [];
 let contextGate: PromiseWithResolvers<void> | null = null;
+/** Holds every screenshot until released, so a test can act while one is in flight. */
+let captureGate: {
+  readonly started: PromiseWithResolvers<void>;
+  readonly release: PromiseWithResolvers<void>;
+  readonly events: Array<string>;
+} | null = null;
 type ClipboardBinding = (source: { page: unknown }, text: unknown) => void;
 let clipboardBinding: ClipboardBinding | null = null;
 let contextFailure: Error | null = null;
@@ -255,6 +269,7 @@ const viewerInput = (tabId: string, canOperate: boolean) => ({
 beforeEach(() => {
   contexts.length = 0;
   contextGate = null;
+  captureGate = null;
   contextFailure = null;
   desktopTabs.clear();
   desktopRendersNext = false;
@@ -1135,6 +1150,49 @@ it.live("mints a protected-authentication grant only for the caller's own tab", 
       expect(missing._tag).toBe("PreviewAutomationTabNotFoundError");
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "a viewer still in flight when a protected interval begins is drained first and dropped",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, broker, tabId } = yield* ready;
+        const { grant } = yield* broker.invoke<PreviewAutomationAuthenticationGrant>({
+          scope,
+          tabId,
+          operation: "authenticationGrant",
+          input: {},
+        });
+        const gate = {
+          started: Promise.withResolvers<void>(),
+          release: Promise.withResolvers<void>(),
+          events: [] as Array<string>,
+        };
+        captureGate = gate;
+        yield* Effect.addFinalizer(() => Effect.sync(() => gate.release.resolve()));
+        // A new viewer of an idle page starts from a still, which the gate holds.
+        const attaching = yield* browser
+          .attachViewer(viewerInput(tabId, false))
+          .pipe(Effect.forkScoped);
+        yield* Effect.promise(() => gate.started.promise);
+        const deadline = (yield* Clock.currentTimeMillis) + 30_000;
+        const begun = browser.protectedHost.begin({ grant, deadline }).then((interval) => {
+          gate.events.push("begun");
+          return interval;
+        });
+        // A begin that did not wait for the still would finish in this turn.
+        yield* Effect.yieldNow;
+        gate.release.resolve();
+        const interval = yield* Effect.promise(() => begun);
+        const viewer = yield* Fiber.join(attaching);
+        // The interval began only once the still was done, and the still never reached the viewer.
+        expect(gate.events).toEqual(["captured", "begun"]);
+        const outputs = yield* Queue.takeAll(viewer.output);
+        expect(outputs.filter((output) => output._tag === "frame")).toEqual([]);
+        yield* Effect.promise(() => interval.end());
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live("does not mint a grant for a tab the desktop renders", () =>
