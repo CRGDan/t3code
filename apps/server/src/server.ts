@@ -66,6 +66,7 @@ import * as PortScanner from "./preview/PortScanner.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as ServerBrowserStream from "./preview/ServerBrowserStream.ts";
+import * as ProtectedAuthenticationSocket from "./preview/ProtectedAuthenticationSocket.ts";
 import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -674,6 +675,8 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerAttachmentUploadRoute,
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,
+    // Off unless protected-auth.json opts in; see ProtectedAuthenticationSocket.
+    ProtectedAuthenticationSocket.layer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
   ),
