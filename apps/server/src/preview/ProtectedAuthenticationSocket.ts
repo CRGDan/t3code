@@ -106,16 +106,19 @@ const errnoCode = (cause: unknown) => {
 };
 
 /** A protocol failure; `code` is all the client learns. */
-class RequestError extends Schema.TaggedError<RequestError>()("ProtectedSocketRequestError", {
-  code: Schema.Literals(["bad-request", "unavailable"]),
-}) {
+class ProtectedSocketRequestError extends Schema.TaggedError<ProtectedSocketRequestError>()(
+  "ProtectedSocketRequestError",
+  {
+    code: Schema.Literals(["bad-request", "unavailable"]),
+  },
+) {
   override get message(): string {
     return `Protected authentication request failed: ${this.code}`;
   }
 }
 
-const isRequestError = Schema.is(RequestError);
-const badRequest = () => new RequestError({ code: "bad-request" });
+const isProtectedSocketRequestError = Schema.is(ProtectedSocketRequestError);
+const badRequest = () => new ProtectedSocketRequestError({ code: "bad-request" });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -220,7 +223,7 @@ const handleConnection = (host: ProtectedHost, secret: string, socket: NodeNet.S
         });
         if (socket.destroyed) {
           await interval.end();
-          throw new RequestError({ code: "unavailable" });
+          throw new ProtectedSocketRequestError({ code: "unavailable" });
         }
         const id = `i${String(++sequence)}`;
         intervals.set(id, interval);
@@ -289,7 +292,10 @@ const handleConnection = (host: ProtectedHost, secret: string, socket: NodeNet.S
       try {
         send({ id, ok: true, result: await dispatch(request) });
       } catch (cause) {
-        const code = isProtectedHostError(cause) || isRequestError(cause) ? cause.code : "failed";
+        const code =
+          isProtectedHostError(cause) || isProtectedSocketRequestError(cause)
+            ? cause.code
+            : "failed";
         send({ id, ok: false, code });
       }
     })();

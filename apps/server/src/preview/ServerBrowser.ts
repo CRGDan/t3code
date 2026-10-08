@@ -1641,11 +1641,13 @@ const make = Effect.gen(function* () {
           "PreviewAutomationExecutionError",
           "Protected authentication needs a headless server tab; this tab renders in the desktop app.",
         );
-      const minted = grants.mint({
-        threadId: tab.threadId,
-        tabId: tab.tabId,
-        agentSessionId: request.agentSessionId!,
-      });
+      const agentSessionId = request.agentSessionId;
+      // requireTab already refused a request without one; this narrows it.
+      if (!agentSessionId)
+        throw new BrowserControlInterrupted(
+          "The agent session is missing. Reconnect the provider.",
+        );
+      const minted = grants.mint({ threadId: tab.threadId, tabId: tab.tabId, agentSessionId });
       return {
         grant: minted.grant,
         tabId: tab.tabId,
