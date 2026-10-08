@@ -18,7 +18,10 @@ export type { HomeHeaderEnvironment } from "./HomeHeader.types";
 export function HomeHeader(props: HomeHeaderProps) {
   const usesNativeMailSearchToolbar = useNativeMailSearchToolbar();
   const primaryColumn = use(NativePrimaryColumnContext);
-  const iPadSidebar = Platform.OS === "ios" && Platform.isPad && primaryColumn !== null;
+  const sidebarHeader =
+    Platform.OS === "ios" &&
+    primaryColumn !== null &&
+    (Platform.isPad || !usesNativeMailSearchToolbar);
   const searchBarRef = useRef<SearchBarCommands>(null);
   const iconColor = useUniwindTheme()["--color-icon"];
   // The list uses a fixed creation order and ignores sort/group options, so
@@ -42,7 +45,7 @@ export function HomeHeader(props: HomeHeaderProps) {
           // (GLASS_HEADER_OPTIONS). Only dynamic values are set here.
           headerTintColor: iconColor,
           unstable_headerRightItems: () =>
-            iPadSidebar
+            sidebarHeader
               ? createSidebarHeaderItems({
                   filterIcon: hasCustomListOptions
                     ? "line.3.horizontal.decrease.circle.fill"
@@ -62,7 +65,7 @@ export function HomeHeader(props: HomeHeaderProps) {
                 ],
           // The keys below are set per-branch (not `undefined`) so a later
           // reapply cannot clobber options owned by NativeHeaderToolbar.
-          ...(iPadSidebar
+          ...(sidebarHeader
             ? {
                 headerSearchBarOptions: {
                   ref: searchBarRef,
@@ -128,7 +131,7 @@ export function HomeHeader(props: HomeHeaderProps) {
         }}
       />
 
-      {iPadSidebar || usesNativeMailSearchToolbar ? null : (
+      {sidebarHeader || usesNativeMailSearchToolbar ? null : (
         <NativeHeaderToolbar placement="bottom">
           <NativeHeaderToolbar.Menu
             accessibilityLabel="Filter threads"
