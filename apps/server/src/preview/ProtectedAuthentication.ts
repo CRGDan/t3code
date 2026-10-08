@@ -337,14 +337,18 @@ export const readTargetText = async (page: Page, target: ProtectedFormTarget) =>
   }
 };
 
-/** A GET from the page's browser context, with its cookies. */
+/**
+ * A GET from the page's browser context, with its cookies. A redirect is not
+ * followed: its 3xx comes back as the status, so an account check is only
+ * ever answered by the URL the credential service vetted.
+ */
 export const fetchFromContext = async (page: Page, url: string, timeout: number) => {
   const parsed = URL.parse(url);
   if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:"))
     throw new ProtectedHostError({ code: "failed" });
   const response = await page
     .context()
-    .request.get(parsed.href, { failOnStatusCode: false, maxRedirects: 10, timeout });
+    .request.get(parsed.href, { failOnStatusCode: false, maxRedirects: 0, timeout });
   try {
     const body = await response.body();
     return {

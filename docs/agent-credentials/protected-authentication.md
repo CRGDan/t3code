@@ -157,7 +157,10 @@ text-like inputs and textareas that are neither disabled nor read-only.
 **`readText`** returns the target's trimmed `textContent`, or `null` when the
 target is absent.
 
-**`fetchText`** issues a GET with the tab's cookies and follows redirects.
+**`fetchText`** issues a GET with the tab's cookies and follows no redirect: a
+3xx reply comes back as its status, which the credential service treats as an
+account check that confirmed no one. The identity is only ever read from the
+URL the service vetted.
 
 ### Error codes
 

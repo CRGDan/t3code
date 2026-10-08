@@ -172,6 +172,13 @@ addEventListener("change", (e) => console.log("changed " + e.target.value));
           ),
         );
         return;
+      case "GET /redirect":
+        return redirect(url.searchParams.get("to") ?? "/");
+      case "GET /impostor/api/account":
+        // Names the account to anyone: what an account check must never reach by redirect.
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ account: "synthetic@example.test" }));
+        return;
       default:
         response.writeHead(404);
         response.end();
@@ -319,6 +326,26 @@ it.live(
           body: JSON.stringify({ account: "synthetic@example.test" }),
         });
         yield* Effect.promise(() => interval.end());
+      }),
+    ).pipe(Effect.provide(layer)),
+  60_000,
+);
+
+it.live(
+  "returns an account check's redirect unfollowed, never the body where it lands",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { grant } = yield* openWithGrant("/login");
+        const interval = yield* begin(grant, 30_000);
+        // Same server, another origin: localhost is not 127.0.0.1.
+        const elsewhere = `${origin.replace("127.0.0.1", "localhost")}/impostor/api/account`;
+        const response = yield* Effect.promise(() =>
+          interval.fetchText(`${origin}/redirect?to=${encodeURIComponent(elsewhere)}`),
+        );
+        yield* Effect.promise(() => interval.end());
+        expect(response.status).toBe(303);
+        expect(response.body).not.toContain("synthetic@example.test");
       }),
     ).pipe(Effect.provide(layer)),
   60_000,
