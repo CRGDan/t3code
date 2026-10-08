@@ -20,6 +20,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 import { chromium } from "playwright-core";
 import { afterAll, beforeAll, expect } from "vite-plus/test";
@@ -99,8 +100,9 @@ addEventListener("change", (e) => console.log("changed " + e.target.value));
         return html(
           page(
             "Sign in",
+            // Typing moves the page, so the navigation commits before that fill returns.
             loginForm(
-              `<script>setTimeout(() => { location.href = "/login?moved=1"; }, 200);</script>`,
+              `<script>addEventListener("input", () => history.pushState(null, "", "/login?moved=1"), { once: true });</script>`,
             ),
           ),
         );
@@ -504,8 +506,7 @@ it.live(
         const interval = yield* begin(grant, 30_000);
         const first = yield* Effect.promise(() => interval.inspect([login, password]));
         yield* Effect.promise(() => interval.fill(login, "synthetic@example.test", first));
-        // The page's own script moves it to /login?moved=1.
-        yield* Effect.sleep("600 millis");
+        // The page's own script moved it to /login?moved=1 as the username was typed.
         expect(yield* hostError(interval.fill(password, PASSWORD, first))).toBe("navigated");
         expect(yield* hostError(interval.submit(signIn, first))).toBe("navigated");
         const moved = yield* Effect.promise(() => interval.inspect([password]));
@@ -556,24 +557,34 @@ it.live(
     Effect.scoped(
       Effect.gen(function* () {
         const { broker, tabId, grant } = yield* openWithGrant("/login");
+        const opened = yield* (yield* Manager.PreviewManager).subscribeEvents;
         yield* broker.invoke({
           scope,
           tabId,
           operation: "evaluate",
           input: { expression: "void window.open('/login?popup=1')" },
         });
-        let popupId: string | undefined;
-        while (popupId === undefined) {
-          const status = yield* broker.invoke<PreviewAutomationStatus>({
-            scope,
-            tabId,
-            operation: "status",
-            input: {},
-          });
-          popupId = status.tabs?.find((tab) => tab.openerTabId === tabId)?.tabId;
-          if (popupId === undefined) yield* Effect.sleep("50 millis");
+        let popup: PreviewTabId | undefined;
+        while (popup === undefined) {
+          const event = yield* PubSub.take(opened);
+          if (event.type === "opened" && event.tabId !== tabId) popup = event.tabId;
         }
-        const popup = PreviewTabId.make(popupId);
+        // Acting on the popup waits for its server tab, so the lock below covers it.
+        yield* broker.invoke({
+          scope,
+          tabId: popup,
+          operation: "evaluate",
+          input: { expression: "1" },
+        });
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.tabs).toContainEqual(
+          expect.objectContaining({ tabId: popup, openerTabId: tabId }),
+        );
         const interval = yield* begin(grant, 30_000);
         const refused = yield* broker
           .invoke<void>({ scope, tabId: popup, operation: "evaluate", input: { expression: "1" } })
