@@ -74,7 +74,7 @@ import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { ServerBrowserContexts } from "./ServerBrowserContexts.ts";
-import { GrantRegistry } from "./ProtectedAuthentication.ts";
+import * as Protected from "./ProtectedAuthentication.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 
 const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
@@ -238,6 +238,8 @@ export class ServerBrowser extends Context.Service<
     }) => Effect.Effect<Option.Option<{ readonly path: string; readonly fileName: string }>>;
     /** Deletes a human profile's server-side storage, closing its open tabs first. */
     readonly clearProfile: (profileId: string) => Effect.Effect<void, PreviewClearProfileError>;
+    /** Protected authentication intervals for the private host API. */
+    readonly protectedHost: Protected.ProtectedHost;
   }
 >()("t3/preview/ServerBrowser") {}
 
@@ -318,6 +320,8 @@ interface ServerTab {
   captureLock: Promise<void>;
   /** Scaled captures rendering now; screencasts stay stopped meanwhile. */
   capturing: number;
+  /** Counts committed navigations of any frame. */
+  pageVersion: number;
 }
 
 interface ServerDownload {
@@ -456,7 +460,19 @@ const make = Effect.gen(function* () {
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
-  const grants = new GrantRegistry();
+  const grants = new Protected.GrantRegistry();
+  /** Browser contexts a protected interval holds, and how to cancel it. */
+  const protectedContexts = new Map<BrowserContext, { readonly cancel: () => Promise<void> }>();
+  /** Stable ids for contexts, so a credential service can tell popups share one. */
+  const contextIds = new WeakMap<BrowserContext, string>();
+  const isProtected = (tab: ServerTab) => protectedContexts.has(tab.page.context());
+  const assertUnprotected = (tab: ServerTab) => {
+    if (isProtected(tab))
+      throw new BrowserControlInterrupted(
+        "A protected authentication holds this tab's browser storage.",
+        "protected",
+      );
+  };
 
   const contexts = new ServerBrowserContexts({
     profilesDir: NodePath.join(config.stateDir, "server-browser", "profiles"),
@@ -539,6 +555,8 @@ const make = Effect.gen(function* () {
   };
 
   const reportLoaded = async (tab: ServerTab) => {
+    // Ending a protected interval reports the page it left.
+    if (isProtected(tab)) return;
     const url = tab.page.url();
     // Chromium's error page loads after `requestfailed` and must not clear LoadFailed.
     if (url === "about:blank" || url.startsWith("chrome-error://")) return;
@@ -759,6 +777,7 @@ const make = Effect.gen(function* () {
       initialNavigation: null,
       captureLock: Promise.resolve(),
       capturing: 0,
+      pageVersion: 0,
     };
     if (!desktop) {
       await page.setViewportSize(fixedViewportSize(tab.setting) ?? UNATTACHED_FILL_VIEWPORT);
@@ -776,19 +795,21 @@ const make = Effect.gen(function* () {
       void reportLoaded(tab);
     });
     page.on("framenavigated", (frame) => {
+      tab.pageVersion += 1;
       // Same-document navigations (SPA routes) fire no load event.
       if (frame === page.mainFrame() && !tab.loading) void reportLoaded(tab);
     });
     page.on("requestfailed", (request) => {
       const errorText = request.failure()?.errorText ?? "";
-      pushBounded(tab.networkEntries, {
-        url: request.url(),
-        method: request.method(),
-        status: null,
-        failed: true,
-        errorText,
-        timestamp: new Date().toISOString(),
-      });
+      if (!isProtected(tab))
+        pushBounded(tab.networkEntries, {
+          url: request.url(),
+          method: request.method(),
+          status: null,
+          failed: true,
+          errorText,
+          timestamp: new Date().toISOString(),
+        });
       if (!isMainNavigation(request) || errorText.includes("ERR_ABORTED")) return;
       tab.loading = false;
       const { code, description } = ServerBrowserPage.parseNetError(errorText);
@@ -800,7 +821,9 @@ const make = Effect.gen(function* () {
         description,
       });
     });
+    // Protected intervals leave no console or network evidence.
     page.on("response", (response) => {
+      if (isProtected(tab)) return;
       pushBounded(tab.networkEntries, {
         url: response.url(),
         method: response.request().method(),
@@ -810,6 +833,7 @@ const make = Effect.gen(function* () {
       });
     });
     page.on("console", (message) => {
+      if (isProtected(tab)) return;
       pushBounded(tab.consoleEntries, {
         level: message.type(),
         text: message.text().slice(0, 2_000),
@@ -817,6 +841,8 @@ const make = Effect.gen(function* () {
       });
     });
     page.on("dialog", (dialog) => {
+      // Nobody may read or answer a dialog during a protected interval.
+      if (isProtected(tab)) return void dialog.dismiss().catch(constVoid);
       tab.dialog = dialog;
       broadcastControl(tab);
     });
@@ -1006,7 +1032,7 @@ const make = Effect.gen(function* () {
   const adoptPopup = async (opener: ServerTab, popup: Page) => {
     const agentId = opener.control.agentId;
     // A popup past an agent's limit closes; its page sees window.open return a closed window.
-    if (opener.closing || (agentId !== null && atTabLimit(agentId))) {
+    if (opener.closing || isProtected(opener) || (agentId !== null && atTabLimit(agentId))) {
       await popup.close().catch(constVoid);
       return;
     }
@@ -1088,7 +1114,12 @@ const make = Effect.gen(function* () {
   const closeIdleAgentTabs = () => {
     const cutoff = Date.now() - AGENT_TAB_IDLE_MS;
     for (const tab of tabs.values()) {
-      if (tab.control.agentId !== null && tab.viewers.size === 0 && tab.usedAt < cutoff)
+      if (
+        tab.control.agentId !== null &&
+        tab.viewers.size === 0 &&
+        tab.usedAt < cutoff &&
+        !isProtected(tab)
+      )
         dropTab(tab, true);
     }
   };
@@ -1155,7 +1186,7 @@ const make = Effect.gen(function* () {
         completedAt,
       })),
     };
-    if (status.url === null || tab.dialog) return status;
+    if (status.url === null || tab.dialog || isProtected(tab)) return status;
     return { ...status, title: (await tab.page.title().catch(() => "")) || null };
   };
 
@@ -1230,6 +1261,12 @@ const make = Effect.gen(function* () {
         session = opened;
         const framesInFlight = new Set<Promise<void>>();
         opened.on("Page.screencastFrame", (frame) => {
+          if (isProtected(tab)) {
+            void opened
+              .send("Page.screencastFrameAck", { sessionId: frame.sessionId })
+              .catch(constVoid);
+            return;
+          }
           const cssWidth = tab.page.viewportSize()?.width ?? frame.metadata.deviceWidth;
           const delivered: Promise<void> = encoder
             .evaluate(
@@ -1288,7 +1325,7 @@ const make = Effect.gen(function* () {
         // Viewers that attached during the capture start here too.
         await Promise.all([
           ...[...tab.viewers].map((viewer) => viewer.resume()),
-          recording && tab.recording === recording
+          recording && tab.recording === recording && !isProtected(tab)
             ? recording.session.send("Page.startScreencast", RECORDING_SCREENCAST).catch(constVoid)
             : undefined,
         ]);
@@ -1518,6 +1555,7 @@ const make = Effect.gen(function* () {
               }),
             ),
           ));
+        if (existing) assertUnprotected(existing);
         if (existing?.dialog)
           throw new BrowserControlInterrupted(
             "A browser dialog is pending. Read preview_status and use preview_dialog first.",
@@ -1583,10 +1621,12 @@ const make = Effect.gen(function* () {
             "No recording is active for this thread.",
           );
         }
+        assertUnprotected(tab);
         return tab.control.agent(request.agentSessionId ?? "", () => stopRecording(tab));
       }
     }
     const tab = await requireTab(request);
+    assertUnprotected(tab);
     if (request.operation === "authenticationGrant") {
       if (tab.control.controller !== null)
         throw new BrowserControlInterrupted("A human controls this tab.", "humanControl");
@@ -1967,7 +2007,8 @@ const make = Effect.gen(function* () {
         screencastScale = scale;
         screencastParams = screencastParams.then(async () => {
           // A scaled capture is rendering; its resume starts the stream.
-          if (tab.capturing > 0) return;
+          // A protected interval's end does too.
+          if (tab.capturing > 0 || isProtected(tab)) return;
           await session.send("Page.stopScreencast").catch(constVoid);
           await session
             .send("Page.startScreencast", {
@@ -2032,6 +2073,7 @@ const make = Effect.gen(function* () {
       pushFileChooser(tab);
       // Full scale: a scaled capture would flash in every other viewer.
       const pushStill = async () => {
+        if (isProtected(tab)) return;
         const data = await withCaptureLock(tab, () =>
           ServerBrowserPage.captureViewport(tab.page, session, {
             format: "jpeg",
@@ -2050,6 +2092,12 @@ const make = Effect.gen(function* () {
       );
       let screencastStarted = false;
       session.on("Page.screencastFrame", (frame) => {
+        if (isProtected(tab)) {
+          void session
+            .send("Page.screencastFrameAck", { sessionId: frame.sessionId })
+            .catch(constVoid);
+          return;
+        }
         screencastStarted = true;
         if (framesInFlight > 0) mayHaveDropped = true;
         framesInFlight += 1;
@@ -2108,6 +2156,7 @@ const make = Effect.gen(function* () {
             if (!message) return;
             try {
               if (message.type === "takeControl") {
+                assertUnprotected(tab);
                 const taking = tab.control.take(viewer.id);
                 broadcastControl(tab);
                 await taking;
@@ -2206,6 +2255,180 @@ const make = Effect.gen(function* () {
     }),
   );
 
+  const pauseObservation = (tab: ServerTab) =>
+    Promise.all([
+      ...[...tab.viewers].map((viewer) => viewer.pause()),
+      tab.recording?.session.send("Page.stopScreencast").catch(constVoid),
+    ]);
+
+  const resumeObservation = (tab: ServerTab) =>
+    Promise.all([
+      ...[...tab.viewers].map((viewer) => viewer.resume()),
+      tab.recording?.session.send("Page.startScreencast", RECORDING_SCREENCAST).catch(constVoid),
+    ]);
+
+  /**
+   * One protected interval: the tab's browser context is locked, every tab in
+   * it stops being observable, and their action queues are held so nothing
+   * else runs on them until the interval ends, is cancelled, or its deadline
+   * passes. Ending clears whatever was filled.
+   */
+  const beginProtected: Protected.ProtectedHost["begin"] = async (input) => {
+    const claim = grants.redeem(input.grant);
+    if (input.tabId !== undefined && input.tabId !== claim.tabId)
+      throw new Protected.ProtectedHostError("grant-invalid");
+    const tab = tabs.get(tabKey(claim.threadId, claim.tabId));
+    if (!tab || tab.closing || tab.page.isClosed())
+      throw new Protected.ProtectedHostError("tab-closed");
+    if (tab.control.agentId !== claim.agentSessionId)
+      throw new Protected.ProtectedHostError("tab-not-owned");
+    if (tab.desktop) throw new Protected.ProtectedHostError("unavailable");
+    const context = tab.page.context();
+    const members = () =>
+      [...tabs.values()].filter((member) => !member.desktop && member.page.context() === context);
+    if (
+      protectedContexts.has(context) ||
+      members().some((member) => member.control.controller !== null || member.dialog !== null)
+    )
+      throw new Protected.ProtectedHostError("busy");
+    const until = Math.min(input.deadline, Date.now() + Protected.MAX_INTERVAL_MS);
+    const remaining = () => until - Date.now();
+    if (remaining() <= 0) throw new Protected.ProtectedHostError("timeout");
+    const contextId = contextIds.get(context) ?? NodeCrypto.randomUUID();
+    contextIds.set(context, contextId);
+
+    const released = Promise.withResolvers<void>();
+    const filled: Array<Protected.ProtectedFormTarget> = [];
+    let open = true;
+    let chain: Promise<unknown> = Promise.resolve();
+    let finishing: Promise<void> | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onClose = () => void finish();
+    const finish = (): Promise<void> =>
+      (finishing ??= (async () => {
+        open = false;
+        clearTimeout(timer);
+        tab.page.off("close", onClose);
+        // A running step stops at its own timeout; clear behind it, not under it.
+        await Promise.race([chain, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+        if (!tab.page.isClosed()) await Protected.clearTargets(tab.page, filled.splice(0));
+        released.resolve();
+        protectedContexts.delete(context);
+        for (const member of members()) {
+          await resumeObservation(member).catch(constVoid);
+          if (!member.loading) void reportLoaded(member);
+        }
+      })());
+    protectedContexts.set(context, { cancel: finish });
+    timer = setTimeout(() => void finish(), remaining());
+    tab.page.once("close", onClose);
+
+    try {
+      const held = members();
+      await Promise.all(held.map(pauseObservation));
+      // Hold every queue; work already running drains first.
+      const entries = held.map((member) => {
+        const entered = Promise.withResolvers<void>();
+        const hold = async () => {
+          entered.resolve();
+          await released.promise;
+        };
+        const queued =
+          member === tab
+            ? member.control.agent(claim.agentSessionId, hold)
+            : member.control.system(hold);
+        const refused = () => entered.reject(new Protected.ProtectedHostError("busy"));
+        queued.then(refused, refused);
+        entered.promise.catch(constVoid);
+        return entered.promise;
+      });
+      let entryTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all(entries),
+        new Promise((_, reject) => {
+          entryTimer = setTimeout(
+            () => reject(new Protected.ProtectedHostError("timeout")),
+            remaining(),
+          );
+        }),
+      ]).finally(() => clearTimeout(entryTimer));
+    } catch (cause) {
+      await finish();
+      throw Protected.toHostError(cause, { open: true, closed: tab.page.isClosed() });
+    }
+
+    const step = <A>(run: () => Promise<A>): Promise<A> => {
+      const result = chain.then(async () => {
+        if (!open) throw new Protected.ProtectedHostError("timeout");
+        if (tab.closing || tab.page.isClosed())
+          throw new Protected.ProtectedHostError("tab-closed");
+        try {
+          return await run();
+        } catch (cause) {
+          throw Protected.toHostError(cause, {
+            open,
+            closed: tab.closing || tab.page.isClosed(),
+          });
+        }
+      });
+      chain = result.catch(constVoid);
+      return result;
+    };
+    const checkVersion = (expected: { readonly pageVersion: number }) => {
+      if (tab.pageVersion !== expected.pageVersion)
+        throw new Protected.ProtectedHostError("navigated");
+    };
+    // A failed fill or submit leaves no value behind.
+    const clearOnFailure = async (run: () => Promise<void>) => {
+      try {
+        await run();
+      } catch (cause) {
+        await Protected.clearTargets(tab.page, filled.splice(0));
+        throw cause;
+      }
+    };
+
+    return {
+      contextId,
+      inspect: (targets) =>
+        step(async () => {
+          // Read first: a navigation while resolving targets must fail the next fill.
+          const pageVersion = tab.pageVersion;
+          const states: Array<Protected.ProtectedTargetState> = [];
+          for (const target of targets) states.push(await Protected.targetState(tab.page, target));
+          return {
+            url: tab.page.url(),
+            pageVersion,
+            frames: tab.page.frames().map((frame) => ({ url: frame.url() })),
+            targets: states,
+          };
+        }),
+      fill: (target, value, expected) =>
+        step(() =>
+          clearOnFailure(async () => {
+            checkVersion(expected);
+            await Protected.withEditableTarget(tab.page, target, async (handle) => {
+              checkVersion(expected);
+              filled.push(target);
+              await handle.fill(value, { timeout: Math.max(1, remaining()) });
+            });
+          }),
+        ),
+      submit: (target, expected) =>
+        step(() =>
+          clearOnFailure(async () => {
+            checkVersion(expected);
+            await Protected.submitTarget(tab.page, target, () => tab.pageVersion, remaining);
+          }),
+        ),
+      clear: (targets) => step(() => Protected.clearTargets(tab.page, targets)),
+      readText: (target) => step(() => Protected.readTargetText(tab.page, target)),
+      fetchText: (url) =>
+        step(() => Protected.fetchFromContext(tab.page, url, Math.max(1, remaining()))),
+      end: finish,
+    };
+  };
+
   const clearProfile = (profileId: string) =>
     Effect.tryPromise({
       try: () => contexts.clearProfile(profileId),
@@ -2217,6 +2440,7 @@ const make = Effect.gen(function* () {
     clearProfile,
     openDownload,
     answerFileChooser,
+    protectedHost: { begin: beginProtected },
   });
 });
 

@@ -1104,7 +1104,7 @@ it.live("mints a protected-authentication grant only for the caller's own tab", 
       });
       expect(grant.tabId).toBe(tabId);
       expect(grant.grant).toMatch(/^t3pa_[\w-]{40,}$/);
-      expect(Date.parse(grant.expiresAt)).toBeGreaterThan(Date.now());
+      expect(Date.parse(grant.expiresAt)).toBeGreaterThan(yield* Clock.currentTimeMillis);
       const second = yield* broker.invoke<PreviewAutomationAuthenticationGrant>({
         scope,
         tabId,
@@ -1113,7 +1113,7 @@ it.live("mints a protected-authentication grant only for the caller's own tab", 
       });
       expect(second.grant).not.toBe(grant.grant);
       const foreign = yield* broker
-        .invoke({
+        .invoke<void>({
           scope: asSession("agent-b"),
           tabId,
           operation: "authenticationGrant",
@@ -1125,7 +1125,7 @@ it.live("mints a protected-authentication grant only for the caller's own tab", 
         reason: "agentMismatch",
       });
       const missing = yield* broker
-        .invoke({
+        .invoke<void>({
           scope,
           tabId: PreviewTabId.make("no-such-tab"),
           operation: "authenticationGrant",
@@ -1148,7 +1148,7 @@ it.live("does not mint a grant for a tab the desktop renders", () =>
         input: { reuseExistingTab: false, show: false },
       });
       const refused = yield* broker
-        .invoke({
+        .invoke<void>({
           scope,
           tabId: PreviewTabId.make(opened.tabId!),
           operation: "authenticationGrant",
