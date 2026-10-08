@@ -64,6 +64,7 @@ const fakeHost: ProtectedHost = {
         ended += 1;
         firstEnd.resolve();
       },
+      ended: firstEnd.promise,
     };
     return interval;
   },

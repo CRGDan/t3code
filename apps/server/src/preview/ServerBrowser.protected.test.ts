@@ -616,7 +616,8 @@ it.live(
         const interval = yield* begin(grant, 1_500);
         const first = yield* Effect.promise(() => interval.inspect([password]));
         yield* Effect.promise(() => interval.fill(password, PASSWORD, first));
-        yield* Effect.sleep("2500 millis");
+        // Nothing calls end: only the deadline settles this.
+        yield* Effect.promise(() => interval.ended);
         expect(yield* hostError(interval.inspect([password]))).toBe("timeout");
         expect(yield* readValue(tabId, "#password")).toBe("");
       }),

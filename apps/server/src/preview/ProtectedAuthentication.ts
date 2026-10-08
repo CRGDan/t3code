@@ -109,6 +109,8 @@ export interface ProtectedInterval {
   readonly fetchText: (url: string) => Promise<{ readonly status: number; readonly body: string }>;
   /** Clears what was filled, releases the lock and resumes observation. Idempotent. */
   readonly end: () => Promise<void>;
+  /** Settles once the interval has ended: by `end`, its deadline, or its tab closing. */
+  readonly ended: Promise<void>;
 }
 
 /** The browser side of the private host API. */

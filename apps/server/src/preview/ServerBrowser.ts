@@ -2299,6 +2299,7 @@ const make = Effect.gen(function* () {
     contextIds.set(context, contextId);
 
     const released = Promise.withResolvers<void>();
+    const ended = Promise.withResolvers<void>();
     const filled: Array<Protected.ProtectedFormTarget> = [];
     let open = true;
     let chain: Promise<unknown> = Promise.resolve();
@@ -2322,7 +2323,7 @@ const make = Effect.gen(function* () {
           await resumeObservation(member).catch(constVoid);
           if (!member.loading) void reportLoaded(member);
         }
-      })());
+      })().finally(() => ended.resolve()));
     protectedContexts.add(context);
     timer = setTimeout(() => void finish(), remaining());
     tab.page.once("close", onClose);
@@ -2430,6 +2431,7 @@ const make = Effect.gen(function* () {
       fetchText: (url) =>
         step(() => Protected.fetchFromContext(tab.page, url, Math.max(1, remaining()))),
       end: finish,
+      ended: ended.promise,
     };
   };
 
