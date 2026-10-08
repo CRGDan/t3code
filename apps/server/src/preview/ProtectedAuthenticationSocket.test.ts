@@ -32,7 +32,22 @@ const fakeHost: ProtectedHost = {
       contextId: "context-1",
       inspect: async (targets) => {
         calls.push(`inspect ${targets.map((t) => t.selector).join(",")}`);
-        return { url: "https://site.test/login", pageVersion: 3, frames: [], targets: [] };
+        return {
+          url: "https://site.test/login",
+          pageVersion: 3,
+          frames: [],
+          targets: [
+            {
+              present: true,
+              frameUrl: "https://site.test/login",
+              editable: true,
+              inputType: "password",
+              form: { method: "post", action: "https://site.test/session" },
+            },
+            { present: true, frameUrl: "https://site.test/login", editable: false, form: null },
+            { present: false },
+          ],
+        };
       },
       fill: async (target, value, expected) => {
         if (expected.pageVersion !== 3) throw new ProtectedHostError("navigated");
@@ -127,14 +142,33 @@ describe("serveProtectedHost", () => {
     const client = await connect();
     expect(await client.request({ op: "hello", secret: SECRET })).toMatchObject({
       ok: true,
-      result: { protocol: "t3-protected-auth/1" },
+      result: { protocol: "t3-protected-auth/2" },
     });
     const begun = await client.request({ op: "begin", grant: GOOD_GRANT, deadline: 5_000 });
     expect(begun).toMatchObject({ ok: true, result: { contextId: "context-1" } });
     const interval = (begun.result as { interval: string }).interval;
     expect(
       await client.request({ op: "inspect", interval, targets: [{ selector: "#password" }] }),
-    ).toMatchObject({ ok: true, result: { pageVersion: 3 } });
+    ).toEqual({
+      id: 3,
+      ok: true,
+      result: {
+        url: "https://site.test/login",
+        pageVersion: 3,
+        frames: [],
+        targets: [
+          {
+            present: true,
+            frameUrl: "https://site.test/login",
+            editable: true,
+            inputType: "password",
+            form: { method: "post", action: "https://site.test/session" },
+          },
+          { present: true, frameUrl: "https://site.test/login", editable: false, form: null },
+          { present: false },
+        ],
+      },
+    });
     const filled = await client.request({
       op: "fill",
       interval,

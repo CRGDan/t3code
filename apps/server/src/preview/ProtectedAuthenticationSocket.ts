@@ -24,7 +24,7 @@ import {
 } from "./ProtectedAuthentication.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 
-export const PROTOCOL = "t3-protected-auth/1";
+export const PROTOCOL = "t3-protected-auth/2";
 export const CONFIG_ENV = "T3CODE_PROTECTED_AUTH_CONFIG";
 export const CONFIG_FILE = "protected-auth.json";
 const SOCKET_FILE = "protected-auth.sock";
