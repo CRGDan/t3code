@@ -42,6 +42,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as ServerSettings from "../serverSettings.ts";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
@@ -674,7 +675,7 @@ describe("orchestrator MCP toolkit", () => {
             }),
           );
           const layerTest = Layer.merge(
-            McpHttpServer.layerOrchestratorToolkit,
+            McpHttpServer.layerOrchestratorToolkit.pipe(Layer.provide(ServerSettings.layerTest())),
             McpHttpServer.layerThreadToolkit,
           ).pipe(
             Layer.provideMerge(McpServer.McpServer.layer),
@@ -3810,6 +3811,7 @@ describe("orchestrator MCP toolkit", () => {
           }),
         ]);
         const layerTest = McpHttpServer.layerOrchestratorToolkit.pipe(
+          Layer.provide(ServerSettings.layerTest()),
           Layer.provideMerge(McpServer.McpServer.layer),
           Layer.provideMerge(layerOrchestration),
           Layer.provide(

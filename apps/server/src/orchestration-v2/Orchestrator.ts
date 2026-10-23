@@ -24,6 +24,7 @@ import {
   MessageId,
   type ModelSelection,
   OrchestrationV2Command,
+  OrchestrationV2QuotaContinuationRefusal,
   type OrchestrationV2InternalCommand,
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
@@ -128,6 +129,7 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+import { quotaContinuationRefusal } from "./QuotaContinuation.ts";
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -212,6 +214,20 @@ export class OrchestratorThreadAboveModeLimitError extends Schema.TaggedError<Or
   }
 }
 
+/** A quota recovery continuation the thread's state no longer allows. Nothing was dispatched. */
+export class OrchestratorQuotaContinuationRefusedError extends Schema.TaggedError<OrchestratorQuotaContinuationRefusedError>()(
+  "OrchestratorQuotaContinuationRefusedError",
+  {
+    commandId: CommandId,
+    threadId: ThreadId,
+    reason: OrchestrationV2QuotaContinuationRefusal,
+  },
+) {
+  override get message(): string {
+    return `Thread ${this.threadId} cannot continue that quota failure: ${this.reason}.`;
+  }
+}
+
 export class OrchestratorCommandPreviouslyRejectedError extends Schema.TaggedError<OrchestratorCommandPreviouslyRejectedError>()(
   "OrchestratorCommandPreviouslyRejectedError",
   {
@@ -262,6 +278,7 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorCommandIdConflictError,
   OrchestratorSubagentThreadReadOnlyError,
   OrchestratorThreadAboveModeLimitError,
+  OrchestratorQuotaContinuationRefusedError,
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 
@@ -4485,6 +4502,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         }
       }
+      if (command.quotaContinuationOfRunId !== undefined) {
+        const sourceRunId = command.quotaContinuationOfRunId;
+        const reason =
+          quotaContinuationRefusal(projection, sourceRunId, yield* DateTime.now) ??
+          ((yield* stopReachedRun(command, command.threadId, sourceRunId)) ? "stopped" : null);
+        if (reason !== null) {
+          return yield* new OrchestratorQuotaContinuationRefusedError({
+            commandId: command.commandId,
+            threadId: command.threadId,
+            reason,
+          });
+        }
+        if (command.dispatchMode.type !== "start_immediately") {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "A quota continuation must start immediately.",
+          });
+        }
+      }
       if (command.usageLimitContinuationOfRunId !== undefined) {
         const run = usageLimitBlockedRun(projection.runs, projection.turnItems, null);
         const failure = latestRootProviderFailure(run, projection.turnItems);
@@ -4978,6 +5015,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.restartContinuationOfRunId === undefined
             ? {}
             : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+          ...(command.quotaContinuationOfRunId === undefined
+            ? {}
+            : { quotaContinuationOfRunId: command.quotaContinuationOfRunId }),
         };
         const attempt: OrchestrationV2RunAttempt = {
           id: attemptId,
@@ -5317,6 +5357,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.restartContinuationOfRunId === undefined
             ? {}
             : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+          ...(command.quotaContinuationOfRunId === undefined
+            ? {}
+            : { quotaContinuationOfRunId: command.quotaContinuationOfRunId }),
           ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
             ? { workspacePreparation: dispatchMode.workspaceStrategy }
             : {}),
@@ -6013,6 +6056,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...(command.quotaContinuationOfRunId === undefined
+          ? {}
+          : { quotaContinuationOfRunId: command.quotaContinuationOfRunId }),
         ...wakeWorkStartedAt(projection.runs, command),
       };
       const attempt: OrchestrationV2RunAttempt = {

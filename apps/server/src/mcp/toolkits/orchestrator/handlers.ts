@@ -115,6 +115,15 @@ const handlers = {
         return yield* service.sendToThread(scope, input);
       }),
   ),
+  t3_thread_recover_quota: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.recoverQuota(scope, input);
+      }),
+  ),
   t3_thread_wait: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

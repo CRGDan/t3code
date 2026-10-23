@@ -15,6 +15,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as ServerSettings from "../../serverSettings.ts";
 import * as Schema from "effect/Schema";
 import { McpAttachmentInput } from "./attachment/input.ts";
 import { McpSchema, McpServer, Tool } from "effect/ai";
@@ -104,6 +105,17 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
   }
   expect(names.has("t3_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);
+});
+
+it("publishes quota recovery as its own tool that takes only a thread and a failed run", () => {
+  const schema = Tool.getJsonSchema(OrchestratorToolkit.tools.t3_thread_recover_quota);
+  // A gateway that finds no such tool on an older T3 must not fall back to a send.
+  expect(Object.keys(OrchestratorToolkit.tools)).toContain("t3_thread_recover_quota");
+  expect(schema).toMatchObject({ type: "object", required: ["threadId", "failedRunId"] });
+  expect(Object.keys((schema as { properties: object }).properties)).toEqual([
+    "threadId",
+    "failedRunId",
+  ]);
 });
 
 const threadId = ThreadId.make("mcp-core-thread");
@@ -563,6 +575,7 @@ it.effect("refuses act-as-caller tools to a client caller", () =>
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(ServerSettings.layerTest()),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
@@ -601,6 +614,7 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(ServerSettings.layerTest()),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
@@ -667,6 +681,7 @@ it.effect("a caller cannot interrupt a thread that runs above its own modes", ()
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(ServerSettings.layerTest()),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(

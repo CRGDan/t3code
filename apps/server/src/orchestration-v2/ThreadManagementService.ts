@@ -113,6 +113,8 @@ export interface ThreadManagementSendInput {
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly modelSelection?: ModelSelection;
+  /** Makes the send a quota continuation of this run, refused unless the thread allows it. */
+  readonly quotaContinuationOfRunId?: RunId;
   readonly mode: ThreadManagementSendMode;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
@@ -629,6 +631,9 @@ const make = Effect.gen(function* () {
         text: input.text,
         attachments: input.attachments,
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.quotaContinuationOfRunId === undefined
+          ? {}
+          : { quotaContinuationOfRunId: input.quotaContinuationOfRunId }),
         dispatchMode,
         createdBy: input.createdBy,
         creationSource: input.creationSource,

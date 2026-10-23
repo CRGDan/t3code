@@ -28,6 +28,7 @@ import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
+  OrchestrationV2QuotaContinuationRefusal,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
@@ -438,6 +439,48 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
   delivery: Schema.Literals(["started", "queued", "steered", "restarted"]),
 });
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
+
+export const OrchestratorMcpThreadRecoverQuotaInput = Schema.Struct({
+  threadId: ThreadId,
+  failedRunId: RunId.annotate({ description: "The run that failed on its usage limit." }),
+});
+export type OrchestratorMcpThreadRecoverQuotaInput =
+  typeof OrchestratorMcpThreadRecoverQuotaInput.Type;
+
+export const OrchestratorMcpThreadRecoverQuotaResult = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("committed").annotate({
+      description: "runId continues failedRunId. A retry of this call returns the same run.",
+    }),
+    threadId: ThreadId,
+    failedRunId: RunId,
+    runId: RunId,
+    messageId: MessageId,
+  }),
+  Schema.Struct({
+    status: Schema.Literal("skipped").annotate({
+      description:
+        "The thread's current state rules this continuation out, so nothing was sent. reason says which state.",
+    }),
+    threadId: ThreadId,
+    failedRunId: RunId,
+    reason: Schema.Union([
+      OrchestrationV2QuotaContinuationRefusal,
+      Schema.Literal("auto_resume_disabled"),
+    ]),
+  }),
+  Schema.Struct({
+    status: Schema.Literal("unavailable").annotate({
+      description:
+        "T3 could not confirm an outcome. Calling again from a later session is safe: a continuation that did commit refuses any duplicate.",
+    }),
+    threadId: ThreadId,
+    failedRunId: RunId,
+    detail: Schema.String,
+  }),
+]);
+export type OrchestratorMcpThreadRecoverQuotaResult =
+  typeof OrchestratorMcpThreadRecoverQuotaResult.Type;
 
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   threadId: ThreadId,

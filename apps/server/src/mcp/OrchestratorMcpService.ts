@@ -42,6 +42,8 @@ import {
   type OrchestratorMcpThreadListResult,
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
+  type OrchestratorMcpThreadRecoverQuotaInput,
+  type OrchestratorMcpThreadRecoverQuotaResult,
   type OrchestratorMcpThreadRun,
   type OrchestratorMcpThreadSendInput,
   type OrchestratorMcpThreadSendResult,
@@ -85,6 +87,7 @@ import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   clientRuntimeModeCeiling,
   type McpInvocationScope,
@@ -96,6 +99,14 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
+/** Server-owned, so a quota recovery caller cannot change what the agent is told. */
+const QUOTA_CONTINUATION_TEXT =
+  "Continue the previously authorized work from the quota interruption. Preserve all original scope, review, merge, deployment and user-decision gates. Re-check assumptions that became stale while waiting; do not broaden authorization.";
+// Fixed `unavailable` details, so error text from the server never reaches the caller.
+const QUOTA_RECOVERY_REFUSED_EARLIER =
+  "This session already had this recovery refused. Call again from a new session.";
+const QUOTA_RECOVERY_DISPATCH_FAILED = "T3 could not confirm whether the continuation started.";
+const QUOTA_RECOVERY_SETTINGS_UNREADABLE = "T3 could not read its auto-resume setting.";
 // Events that can make a delegated task terminal: the parent's task record,
 // and the child's runs, nested tasks, and pending provider background work.
 const TASK_WAKE_EVENTS = [
@@ -176,6 +187,14 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
   ) => Effect.Effect<OrchestratorMcpThreadSendResult, OrchestratorMcpFailure>;
+  /**
+   * Continues a usage-limited run once, with T3's own message, while the
+   * thread still allows it. The orchestrator decides under the thread's lock.
+   */
+  readonly recoverQuota: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadRecoverQuotaInput,
+  ) => Effect.Effect<OrchestratorMcpThreadRecoverQuotaResult, OrchestratorMcpFailure>;
   readonly waitForThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadWaitInput,
@@ -835,6 +854,7 @@ const make = Effect.gen(function* () {
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const projects = yield* ProjectService.ProjectService;
+  const settings = yield* ServerSettings.ServerSettingsService;
 
   /** A caller-named project, which must exist before anything is recorded against it. */
   const requireProject = (projectId: ProjectId) =>
@@ -2423,6 +2443,97 @@ const make = Effect.gen(function* () {
           delivery: result.delivery,
         } satisfies OrchestratorMcpThreadSendResult;
       }),
+    recoverQuota: (scope, input) =>
+      Effect.gen(function* () {
+        const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
+        yield* assertLiveCallerForOtherThread(scope, parent, target);
+        yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
+        yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+        const source = { threadId: input.threadId, failedRunId: input.failedRunId };
+        // Same-session retries replay this request's receipt. Other sessions
+        // get new IDs; the run the continuation creates dedupes them.
+        const id = {
+          scope,
+          requestKey: `quota-recovery:${input.threadId}:${input.failedRunId}`,
+          operation: "thread-recover-quota",
+        };
+        const messageId = stableOperationMessageId(id);
+        const dispatch = threadManagement
+          .sendToThread({
+            projectId: target.thread.projectId,
+            commandId: stableCommandId(id),
+            threadId: input.threadId,
+            ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
+            messageId,
+            text: QUOTA_CONTINUATION_TEXT,
+            attachments: [],
+            mode: "auto",
+            quotaContinuationOfRunId: input.failedRunId,
+            createdBy: "agent",
+            creationSource: "mcp",
+          })
+          .pipe(
+            Effect.map((result): OrchestratorMcpThreadRecoverQuotaResult => ({
+              status: "committed",
+              ...source,
+              runId: result.run.id,
+              messageId,
+            })),
+            Effect.catchTags({
+              OrchestratorQuotaContinuationRefusedError: (error) =>
+                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                  status: "skipped",
+                  ...source,
+                  reason: error.reason,
+                }),
+              ThreadManagementThreadArchivedError: () =>
+                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                  status: "skipped",
+                  ...source,
+                  reason: "closed",
+                }),
+              OrchestratorCommandPreviouslyRejectedError: () =>
+                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                  status: "unavailable",
+                  ...source,
+                  detail: QUOTA_RECOVERY_REFUSED_EARLIER,
+                }),
+            }),
+            Effect.catchIf(
+              (error) => error._tag !== "OrchestratorThreadAboveModeLimitError",
+              () =>
+                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                  status: "unavailable",
+                  ...source,
+                  detail: QUOTA_RECOVERY_DISPATCH_FAILED,
+                }),
+            ),
+            // McpToolAccess reports this as the caller's mode ceiling.
+            Effect.mapError((error) => failure("orchestration_error", error.message)),
+          );
+        // Settings writes wait for the dispatch, so turning auto-resume off
+        // either lands first and is seen here, or lands after the commit.
+        return yield* settings
+          .withSettingsSnapshot((current) =>
+            current.autoResumeLimitedThreads
+              ? dispatch
+              : Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                  status: "skipped",
+                  ...source,
+                  reason: "auto_resume_disabled",
+                }),
+          )
+          .pipe(
+            Effect.catchTags({
+              ServerSettingsError: () =>
+                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                  status: "unavailable",
+                  ...source,
+                  detail: QUOTA_RECOVERY_SETTINGS_UNREADABLE,
+                }),
+            }),
+          );
+      }),
     waitForThread: (scope, input) =>
       Effect.gen(function* () {
         const { target } = yield* loadScopedThread(scope, input.threadId);
@@ -2500,4 +2611,5 @@ export const layer: Layer.Layer<
   | ScheduledTaskService.ScheduledTaskService
   | ProjectService.ProjectService
   | SecretRequests.SecretRequests
+  | ServerSettings.ServerSettingsService
 > = Layer.effect(OrchestratorMcpService, make);

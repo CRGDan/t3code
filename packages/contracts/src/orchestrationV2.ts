@@ -538,6 +538,25 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 /** Failure code on the error item a failed workspace preparation leaves. */
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
+/** Why a quota recovery continuation was refused under the thread's dispatch lock. */
+export const OrchestrationV2QuotaContinuationRefusal = Schema.Literals([
+  "already_continued",
+  "not_latest_failure",
+  "not_usage_limit",
+  "native_recovery",
+  "model_changed",
+  "stopped",
+  "opted_out",
+  "settled",
+  "snoozed",
+  "closed",
+  "subagent_thread",
+  "pending_request",
+  "queue_held",
+]);
+export type OrchestrationV2QuotaContinuationRefusal =
+  typeof OrchestrationV2QuotaContinuationRefusal.Type;
+
 export const OrchestrationV2Run = Schema.Struct({
   id: RunId,
   threadId: ThreadId,
@@ -559,6 +578,11 @@ export const OrchestrationV2Run = Schema.Struct({
   contextHandoffId: Schema.NullOr(ContextHandoffId),
   /** Links server-generated restart continuations to the interrupted run. */
   restartContinuationOfRunId: Schema.optional(RunId),
+  /**
+   * Links a quota recovery continuation to the usage-limited run it continues.
+   * A source named here is consumed, even when this run never starts.
+   */
+  quotaContinuationOfRunId: Schema.optional(RunId),
   /**
    * Set on wake runs (background notifications, delegated task results,
    * restart continuations): when the work they continue started. Read it
@@ -2853,6 +2877,7 @@ export const OrchestrationV2Command = Schema.Union([
     restartContinuationOfRunId: Schema.optional(RunId),
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
+    quotaContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
     /** Resolve untargeted delivery against the server's serialized thread state. */
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),

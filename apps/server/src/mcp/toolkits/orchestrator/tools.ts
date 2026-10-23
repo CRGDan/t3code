@@ -23,6 +23,8 @@ import {
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadRecoverQuotaInput,
+  OrchestratorMcpThreadRecoverQuotaResult,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitInput,
@@ -230,6 +232,19 @@ const ThreadSendTool = Tool.make("t3_thread_send", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadRecoverQuotaTool = Tool.make("t3_thread_recover_quota", {
+  description:
+    "Continue a thread whose latest run failed on its usage limit, after you have confirmed that capacity for that run's provider and model is available again. Use this, never t3_thread_send, for quota recovery. T3 sends its own fixed continuation message on the thread's current model, and only while failedRunId is still the thread's latest failure, native reset recovery does not own it, global auto-resume is on, and no newer work, Stop, snooze, settle, opt-out, pending question, held queue or model change stands in the way. Each failed run is continued at most once. Read status: committed (runId continues it), skipped (reason names the state that rules it out), or unavailable (no confirmed outcome; a later call is safe). Retrying after a lost response returns the same committed run.",
+  parameters: OrchestratorMcpThreadRecoverQuotaInput,
+  success: OrchestratorMcpThreadRecoverQuotaResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Recover a usage-limited T3 thread")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, true);
+
 const ThreadWaitTool = Tool.make("t3_thread_wait", {
   description:
     "Wait for a T3 thread run to reach a terminal durable state. Without runId, the latest run at call time is selected; an idle thread returns immediately. Timeout does not interrupt work, so call again or use t3_thread_read/list after timedOut=true. Waiting reports status only and does not acknowledge a delegated result.",
@@ -271,6 +286,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadReadTool,
   ThreadUpdateTool,
   ThreadSendTool,
+  ThreadRecoverQuotaTool,
   ThreadWaitTool,
   ThreadInterruptTool,
 );

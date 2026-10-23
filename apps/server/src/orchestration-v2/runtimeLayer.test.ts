@@ -10,6 +10,7 @@ import {
   CheckpointRef,
   CommandId,
   ContextTransferId,
+  EnvironmentId,
   EventId,
   MessageId,
   NodeId,
@@ -38,6 +39,7 @@ import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -49,6 +51,12 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
+import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -5601,6 +5609,7 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
     "model-changed",
     "queue-held",
     "subagent",
+    "auto-settled",
   ] as const)("refuses a delayed continuation after %s without changing the thread", (hold) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -5630,6 +5639,7 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
         "model-changed": "model_changed",
         "queue-held": "queue_held",
         subagent: "subagent_thread",
+        "auto-settled": "settled",
       }[hold];
       switch (hold) {
         case "newer-run":
@@ -5743,6 +5753,10 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
           });
           break;
         }
+        case "auto-settled":
+          // A settled time without a user override, as legacy or imported threads carry.
+          yield* writeThread({ ...thread, settledOverride: null, settledAt: now });
+          break;
         case "subagent":
           yield* writeThread({
             ...thread,
@@ -5760,6 +5774,178 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
       assert.deepEqual(after.thread, before.thread);
       assert.deepEqual(after.runs, before.runs);
       assert.deepEqual(after.messages, before.messages);
+    }),
+  );
+
+  /** The MCP service over this test's orchestrator, as a gateway client in `session` reaches it. */
+  const recoverQuotaAs = (
+    settings: ServerSettings.ServerSettingsService["Service"],
+    threads: ThreadManagementService.ThreadManagementService["Service"],
+    session: string,
+    input: { readonly threadId: ThreadId; readonly failedRunId: RunId },
+    access: "full-access" | "approval-required" = "full-access",
+  ) => {
+    const scope: McpInvocationScope = {
+      environmentId: EnvironmentId.make("quota-environment"),
+      requestNamespace: session,
+      thread: undefined,
+      client: { sessionId: session, label: "Gateway", access },
+      capabilities: new Set(["orchestration"]),
+      issuedAt: 1,
+    };
+    return OrchestratorMcpService.OrchestratorMcpService.pipe(
+      Effect.flatMap((mcp) => mcp.recoverQuota(scope, input)),
+      Effect.provide(
+        OrchestratorMcpService.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.succeed(ServerSettings.ServerSettingsService, settings),
+              Layer.succeed(ThreadManagementService.ThreadManagementService, threads),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+              Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                list: () => Effect.succeed([]),
+              }),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+            ),
+          ),
+        ),
+      ),
+    );
+  };
+  const quotaSettings = (autoResumeLimitedThreads: boolean) =>
+    ServerSettings.ServerSettingsService.pipe(
+      Effect.provide(ServerSettings.layerTest({ autoResumeLimitedThreads })),
+    );
+
+  it.effect("recovers through MCP once across sessions and replays a lost response", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const settings = yield* quotaSettings(true);
+      const { threadId, source } = yield* seedQuotaFailure("mcp-once");
+      const input = { threadId, failedRunId: source.id };
+      const first = yield* recoverQuotaAs(settings, threads, "session-a", input);
+      assert.equal(first.status, "committed");
+      assert.deepEqual(yield* recoverQuotaAs(settings, threads, "session-a", input), first);
+      assert.deepEqual(yield* recoverQuotaAs(settings, threads, "session-b", input), {
+        status: "skipped",
+        ...input,
+        reason: "already_continued",
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(projection.runs, 2);
+      const continuation = projection.runs[1]!;
+      assert.equal(first.status === "committed" && first.runId, continuation.id);
+      assert.equal(continuation.quotaContinuationOfRunId, source.id);
+      const message = projection.messages.find(
+        (candidate) => candidate.id === continuation.userMessageId,
+      );
+      assert.include(message?.text, "do not broaden authorization");
+      assert.equal(message?.createdBy, "agent");
+      assert.equal(message?.creationSource, "mcp");
+    }),
+  );
+
+  it.effect("lets a later session recover after a transient refusal", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const settings = yield* quotaSettings(true);
+      const { threadId, source, now } = yield* seedQuotaFailure("mcp-transient");
+      const input = { threadId, failedRunId: source.id };
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("quota:mcp-transient:snooze"),
+        threadId,
+        snoozedUntil: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
+      });
+      assert.deepEqual(yield* recoverQuotaAs(settings, threads, "session-a", input), {
+        status: "skipped",
+        ...input,
+        reason: "snoozed",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("quota:mcp-transient:unsnooze"),
+        threadId,
+        reason: "user",
+      });
+      // The refused session replays its receipt; only a new session decides again.
+      assert.deepEqual(yield* recoverQuotaAs(settings, threads, "session-a", input), {
+        status: "unavailable",
+        ...input,
+        detail: "This session already had this recovery refused. Call again from a new session.",
+      });
+      assert.equal(
+        (yield* recoverQuotaAs(settings, threads, "session-b", input)).status,
+        "committed",
+      );
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
+    }),
+  );
+
+  it.effect("reads global auto-resume under the settings lock", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { threadId, source } = yield* seedQuotaFailure("mcp-settings");
+      const input = { threadId, failedRunId: source.id };
+      assert.deepEqual(
+        yield* recoverQuotaAs(yield* quotaSettings(false), threads, "session-a", input),
+        { status: "skipped", ...input, reason: "auto_resume_disabled" },
+      );
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
+
+      const settings = yield* quotaSettings(true);
+      const order = yield* Ref.make<ReadonlyArray<string>>([]);
+      const dispatching = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const updating = yield* Deferred.make<void>();
+      const gated: typeof threads = {
+        ...threads,
+        sendToThread: (send) =>
+          Deferred.succeed(dispatching, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(threads.sendToThread(send)),
+            Effect.tap(() => Ref.update(order, (entries) => [...entries, "dispatched"])),
+          ),
+      };
+      const recovery = yield* recoverQuotaAs(settings, gated, "session-b", input).pipe(
+        Effect.forkChild,
+      );
+      yield* Deferred.await(dispatching);
+      const update = yield* Deferred.succeed(updating, undefined).pipe(
+        Effect.andThen(settings.updateSettings({ autoResumeLimitedThreads: false })),
+        Effect.tap(() => Ref.update(order, (entries) => [...entries, "settings written"])),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(updating);
+      for (let turn = 0; turn < 10; turn += 1) yield* Effect.yieldNow;
+      assert.deepEqual(yield* Ref.get(order), []);
+      yield* Deferred.succeed(release, undefined);
+      assert.equal((yield* Fiber.join(recovery)).status, "committed");
+      yield* Fiber.join(update);
+      assert.deepEqual(yield* Ref.get(order), ["dispatched", "settings written"]);
+    }),
+  );
+
+  it.effect("keeps the caller's mode ceiling", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { threadId, source } = yield* seedQuotaFailure("mcp-ceiling");
+      const error = yield* recoverQuotaAs(
+        yield* quotaSettings(true),
+        threads,
+        "session-a",
+        { threadId, failedRunId: source.id },
+        "approval-required",
+      ).pipe(Effect.flip);
+      assert.equal(error.code, "runtime_mode_escalation_denied");
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
     }),
   );
 });

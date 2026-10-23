@@ -400,6 +400,31 @@ The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
 idempotent retries.
 
+### `t3_thread_recover_quota`
+
+Continues a thread whose latest run failed on its usage limit, for a trusted
+caller that has confirmed capacity for that run's provider and model. It takes
+only `threadId` and `failedRunId`, and sends T3's own fixed continuation text
+through the ordinary `message.dispatch` path. The caller cannot change the
+message, mode or model.
+
+Under the thread's dispatch lock, the orchestrator refuses unless the failed
+run is still the latest executed run, a `usage_limit` failure that native reset
+recovery does not own, on the thread's current provider and model, and no Stop,
+snooze, settle, opt-out, pending request, held queue, archive or subagent
+lineage stands in the way. The run it creates records
+`quotaContinuationOfRunId`. Any run that names the source, even one cancelled
+before it started, consumes it. That run field is the only cross-session
+dedupe, because each MCP session namespaces its own command IDs. The global
+auto-resume setting is read under the settings write lock, which is held until
+the dispatch commits.
+
+The result is `committed`, `skipped` with the refusal reason, or `unavailable`
+when T3 could not confirm an outcome. A retry in the same session replays the
+receipt.
+Callers must treat a missing tool as unsupported and must not fall back to
+`t3_thread_send`.
+
 ### `t3_thread_wait`
 
 Waits for a selected run to become `completed`, `failed`, `cancelled`,
