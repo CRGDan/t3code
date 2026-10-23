@@ -2484,6 +2484,12 @@ const make = Effect.gen(function* () {
                   ...source,
                   reason: error.reason,
                 }),
+              OrchestratorSubagentThreadReadOnlyError: () =>
+                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                  status: "skipped",
+                  ...source,
+                  reason: "subagent_thread",
+                }),
               OrchestratorCommandPreviouslyRejectedError: () =>
                 unavailable(QUOTA_RECOVERY_REFUSED_EARLIER),
               OrchestratorDispatchError: () => unavailable(QUOTA_RECOVERY_DISPATCH_FAILED),

@@ -5890,6 +5890,41 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
     }),
   );
 
+  it.effect("skips a provider-native subagent thread", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { threadId, source, now } = yield* seedQuotaFailure("mcp-native-subagent");
+      const thread = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      yield* events.write({
+        events: [
+          {
+            id: EventId.make("quota:mcp-native-subagent:lineage"),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...thread,
+              creationSource: "provider",
+              lineage: {
+                parentThreadId: ThreadId.make("quota:native-parent"),
+                relationshipToParent: "subagent",
+                rootThreadId: ThreadId.make("quota:native-parent"),
+              },
+            },
+          },
+        ],
+      });
+      const input = { threadId, failedRunId: source.id };
+      assert.deepEqual(
+        yield* recoverQuotaAs(yield* quotaSettings(true), threads, "session-a", input),
+        { status: "skipped", ...input, reason: "subagent_thread" },
+      );
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
+    }),
+  );
+
   it.effect("reports a thread deleted before the dispatch as not found", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
