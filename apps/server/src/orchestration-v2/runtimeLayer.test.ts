@@ -5833,6 +5833,12 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
       });
       yield* settings.updateSettings({ autoResumeLimitedThreads: false });
       assert.deepEqual(yield* recoverQuotaAs(settings, threads, "session-a", input), first);
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("quota:mcp-once:archive"),
+        threadId,
+      });
+      assert.deepEqual(yield* recoverQuotaAs(settings, threads, "session-a", input), first);
       const projection = yield* orchestrator.getThreadProjection(threadId);
       assert.lengthOf(projection.runs, 2);
       const continuation = projection.runs[1]!;
@@ -5844,6 +5850,67 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
       assert.include(message?.text, "do not broaden authorization");
       assert.equal(message?.createdBy, "agent");
       assert.equal(message?.creationSource, "mcp");
+    }),
+  );
+
+  it.effect("skips a fresh request for an archived thread under the thread lock", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { threadId, source } = yield* seedQuotaFailure("mcp-archived");
+      const input = { threadId, failedRunId: source.id };
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("quota:mcp-archived:archive"),
+        threadId,
+      });
+      const before = yield* orchestrator.getThreadProjection(threadId);
+      const refused = yield* Ref.make<ReadonlyArray<string>>([]);
+      const observed: typeof threads = {
+        ...threads,
+        sendToThread: (send) =>
+          threads
+            .sendToThread(send)
+            .pipe(Effect.tapError((error) => Ref.update(refused, (tags) => [...tags, error._tag]))),
+      };
+      assert.deepEqual(
+        yield* recoverQuotaAs(yield* quotaSettings(true), observed, "session-a", input),
+        {
+          status: "skipped",
+          ...input,
+          reason: "closed",
+        },
+      );
+      assert.deepEqual(yield* Ref.get(refused), ["OrchestratorQuotaContinuationRefusedError"]);
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNotNull(after.thread.archivedAt);
+      assert.deepEqual(after.thread, before.thread);
+      assert.deepEqual(after.runs, before.runs);
+      assert.deepEqual(after.messages, before.messages);
+    }),
+  );
+
+  it.effect("reports a thread deleted before the dispatch as not found", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { threadId, source } = yield* seedQuotaFailure("mcp-deleted");
+      const deleting: typeof threads = {
+        ...threads,
+        sendToThread: (send) =>
+          orchestrator
+            .dispatch({
+              type: "thread.delete",
+              commandId: CommandId.make("quota:mcp-deleted:delete"),
+              threadId,
+            })
+            .pipe(Effect.andThen(threads.sendToThread(send))),
+      };
+      const error = yield* recoverQuotaAs(yield* quotaSettings(true), deleting, "session-a", {
+        threadId,
+        failedRunId: source.id,
+      }).pipe(Effect.flip);
+      assert.equal(error.code, "thread_not_found");
     }),
   );
 

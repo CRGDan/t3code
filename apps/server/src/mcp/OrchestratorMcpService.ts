@@ -2450,10 +2450,12 @@ const make = Effect.gen(function* () {
           operation: "thread-recover-quota",
         };
         const messageId = stableOperationMessageId(sessionRequest);
-        const replayed = target.runs.find((run) => run.userMessageId === messageId);
-        if (replayed !== undefined) {
-          return { status: "committed", ...source, runId: replayed.id, messageId } as const;
-        }
+        const unavailable = (detail: string) =>
+          Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+            status: "unavailable",
+            ...source,
+            detail,
+          });
         const dispatch = threadManagement
           .sendToThread({
             projectId: target.thread.projectId,
@@ -2482,49 +2484,63 @@ const make = Effect.gen(function* () {
                   ...source,
                   reason: error.reason,
                 }),
-              ThreadManagementThreadArchivedError: () =>
-                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
-                  status: "skipped",
-                  ...source,
-                  reason: "closed",
-                }),
               OrchestratorCommandPreviouslyRejectedError: () =>
-                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
-                  status: "unavailable",
-                  ...source,
-                  detail: QUOTA_RECOVERY_REFUSED_EARLIER,
-                }),
+                unavailable(QUOTA_RECOVERY_REFUSED_EARLIER),
+              OrchestratorDispatchError: () => unavailable(QUOTA_RECOVERY_DISPATCH_FAILED),
+              OrchestratorProjectionError: () => unavailable(QUOTA_RECOVERY_DISPATCH_FAILED),
+              OrchestratorDomainEventStreamError: () => unavailable(QUOTA_RECOVERY_DISPATCH_FAILED),
+              OrchestratorProviderAdapterError: () => unavailable(QUOTA_RECOVERY_DISPATCH_FAILED),
+              ThreadManagementProjectionLoadError: () =>
+                unavailable(QUOTA_RECOVERY_DISPATCH_FAILED),
+              ThreadManagementDurableRunProjectionError: () =>
+                unavailable(QUOTA_RECOVERY_DISPATCH_FAILED),
             }),
-            Effect.catchIf(
-              (error) => error._tag !== "OrchestratorThreadAboveModeLimitError",
-              () =>
-                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
-                  status: "unavailable",
-                  ...source,
-                  detail: QUOTA_RECOVERY_DISPATCH_FAILED,
-                }),
-            ),
-            Effect.mapError((error) => failure("orchestration_error", error.message)),
           );
         return yield* settings
           .withSettingsSnapshot((current) =>
-            current.autoResumeLimitedThreads
-              ? dispatch
-              : Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
-                  status: "skipped",
-                  ...source,
-                  reason: "auto_resume_disabled",
+            threadManagement
+              .getProjectThreadRecords(
+                { projectId: target.thread.projectId, threadId: input.threadId },
+                ["runs"],
+              )
+              .pipe(
+                Effect.flatMap(({ runs }) => {
+                  const committed = runs.find(
+                    (run) =>
+                      run.userMessageId === messageId &&
+                      run.quotaContinuationOfRunId === input.failedRunId,
+                  );
+                  if (committed !== undefined) {
+                    return Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                      status: "committed",
+                      ...source,
+                      runId: committed.id,
+                      messageId,
+                    });
+                  }
+                  return current.autoResumeLimitedThreads
+                    ? dispatch
+                    : Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
+                        status: "skipped",
+                        ...source,
+                        reason: "auto_resume_disabled",
+                      });
                 }),
+                Effect.catchTags({
+                  ThreadManagementProjectionLoadError: () =>
+                    unavailable(QUOTA_RECOVERY_DISPATCH_FAILED),
+                }),
+              ),
           )
           .pipe(
             Effect.catchTags({
-              ServerSettingsError: () =>
-                Effect.succeed<OrchestratorMcpThreadRecoverQuotaResult>({
-                  status: "unavailable",
-                  ...source,
-                  detail: QUOTA_RECOVERY_SETTINGS_UNREADABLE,
-                }),
+              ServerSettingsError: () => unavailable(QUOTA_RECOVERY_SETTINGS_UNREADABLE),
             }),
+            Effect.mapError((error) =>
+              isThreadManagementError(error)
+                ? threadManagementFailure(error)
+                : failure("orchestration_error", error.message),
+            ),
           );
       }),
     waitForThread: (scope, input) =>
