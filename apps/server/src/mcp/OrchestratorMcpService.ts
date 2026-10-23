@@ -2450,6 +2450,10 @@ const make = Effect.gen(function* () {
           operation: "thread-recover-quota",
         };
         const messageId = stableOperationMessageId(sessionRequest);
+        const replayed = target.runs.find((run) => run.userMessageId === messageId);
+        if (replayed !== undefined) {
+          return { status: "committed", ...source, runId: replayed.id, messageId } as const;
+        }
         const dispatch = threadManagement
           .sendToThread({
             projectId: target.thread.projectId,

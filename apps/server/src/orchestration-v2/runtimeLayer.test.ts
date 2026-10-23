@@ -5831,6 +5831,8 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
         ...input,
         reason: "already_continued",
       });
+      yield* settings.updateSettings({ autoResumeLimitedThreads: false });
+      assert.deepEqual(yield* recoverQuotaAs(settings, threads, "session-a", input), first);
       const projection = yield* orchestrator.getThreadProjection(threadId);
       assert.lengthOf(projection.runs, 2);
       const continuation = projection.runs[1]!;

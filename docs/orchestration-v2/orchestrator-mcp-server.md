@@ -412,16 +412,18 @@ Under the thread's dispatch lock, the orchestrator refuses unless the failed
 run is still the latest executed run, a `usage_limit` failure that native reset
 recovery does not own, on the thread's current provider and model, and no Stop,
 snooze, settle, opt-out, pending request, held queue, archive or subagent
-lineage stands in the way. The run it creates records
-`quotaContinuationOfRunId`. Any run that names the source, even one cancelled
-before it started, consumes it. That run field is the only cross-session
-dedupe, because each MCP session namespaces its own command IDs. The global
-auto-resume setting is read under the settings write lock, which is held until
-the dispatch commits.
+lineage stands in the way. The global auto-resume setting must also be on,
+otherwise the result is `skipped` with `auto_resume_disabled`. That setting is
+read under the settings write lock, which is held until the dispatch commits.
+The run it creates records `quotaContinuationOfRunId`. Any run that names the
+source, even one cancelled before it started, consumes it. That run field is
+the only cross-session dedupe, because each MCP session namespaces its own
+command IDs.
 
 The result is `committed`, `skipped` with the refusal reason, or `unavailable`
-when T3 could not confirm an outcome. A retry in the same session replays the
-receipt.
+when T3 could not confirm an outcome. A retry in the same session after a
+commit returns the same committed run. A retry in the same session after a
+refusal returns `unavailable`, and only a new session decides again.
 Callers must treat a missing tool as unsupported and must not fall back to
 `t3_thread_send`.
 
