@@ -5502,7 +5502,6 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
         },
       ],
     });
-    // Each caller session derives its own command and message IDs.
     const continuation = (session: string) => ({
       type: "message.dispatch" as const,
       commandId: CommandId.make(`quota:${name}:${session}`),
@@ -5586,7 +5585,6 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const { threadId, continuation } = yield* seedQuotaFailure(`reset:${name}`, resetAt);
-        // A valid reset after completion stays native even once it is due.
         yield* TestClock.adjust("1 minute");
         if (gatewayOwned) {
           yield* orchestrator.dispatch(continuation("session-a"));
@@ -5754,7 +5752,6 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
           break;
         }
         case "auto-settled":
-          // A settled time without a user override, as legacy or imported threads carry.
           yield* writeThread({ ...thread, settledOverride: null, settledAt: now });
           break;
         case "subagent":
@@ -5777,7 +5774,6 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
     }),
   );
 
-  /** The MCP service over this test's orchestrator, as a gateway client in `session` reaches it. */
   const recoverQuotaAs = (
     settings: ServerSettings.ServerSettingsService["Service"],
     threads: ThreadManagementService.ThreadManagementService["Service"],
@@ -5873,7 +5869,6 @@ it.layer(layerTest)("gateway quota continuation", (it) => {
         threadId,
         reason: "user",
       });
-      // The refused session replays its receipt; only a new session decides again.
       assert.deepEqual(yield* recoverQuotaAs(settings, threads, "session-a", input), {
         status: "unavailable",
         ...input,

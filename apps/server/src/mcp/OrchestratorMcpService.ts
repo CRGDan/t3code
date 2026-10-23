@@ -99,10 +99,8 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
-/** Server-owned, so a quota recovery caller cannot change what the agent is told. */
 const QUOTA_CONTINUATION_TEXT =
   "Continue the previously authorized work from the quota interruption. Preserve all original scope, review, merge, deployment and user-decision gates. Re-check assumptions that became stale while waiting; do not broaden authorization.";
-// Fixed `unavailable` details, so error text from the server never reaches the caller.
 const QUOTA_RECOVERY_REFUSED_EARLIER =
   "This session already had this recovery refused. Call again from a new session.";
 const QUOTA_RECOVERY_DISPATCH_FAILED = "T3 could not confirm whether the continuation started.";
@@ -187,10 +185,6 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
   ) => Effect.Effect<OrchestratorMcpThreadSendResult, OrchestratorMcpFailure>;
-  /**
-   * Continues a usage-limited run once, with T3's own message, while the
-   * thread still allows it. The orchestrator decides under the thread's lock.
-   */
   readonly recoverQuota: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadRecoverQuotaInput,
@@ -2450,18 +2444,16 @@ const make = Effect.gen(function* () {
         yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
         yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
         const source = { threadId: input.threadId, failedRunId: input.failedRunId };
-        // Same-session retries replay this request's receipt. Other sessions
-        // get new IDs; the run the continuation creates dedupes them.
-        const id = {
+        const sessionRequest = {
           scope,
           requestKey: `quota-recovery:${input.threadId}:${input.failedRunId}`,
           operation: "thread-recover-quota",
         };
-        const messageId = stableOperationMessageId(id);
+        const messageId = stableOperationMessageId(sessionRequest);
         const dispatch = threadManagement
           .sendToThread({
             projectId: target.thread.projectId,
-            commandId: stableCommandId(id),
+            commandId: stableCommandId(sessionRequest),
             threadId: input.threadId,
             ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
             messageId,
@@ -2508,11 +2500,8 @@ const make = Effect.gen(function* () {
                   detail: QUOTA_RECOVERY_DISPATCH_FAILED,
                 }),
             ),
-            // McpToolAccess reports this as the caller's mode ceiling.
             Effect.mapError((error) => failure("orchestration_error", error.message)),
           );
-        // Settings writes wait for the dispatch, so turning auto-resume off
-        // either lands first and is seen here, or lands after the commit.
         return yield* settings
           .withSettingsSnapshot((current) =>
             current.autoResumeLimitedThreads

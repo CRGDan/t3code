@@ -214,7 +214,6 @@ export class OrchestratorThreadAboveModeLimitError extends Schema.TaggedError<Or
   }
 }
 
-/** A quota recovery continuation the thread's state no longer allows. Nothing was dispatched. */
 export class OrchestratorQuotaContinuationRefusedError extends Schema.TaggedError<OrchestratorQuotaContinuationRefusedError>()(
   "OrchestratorQuotaContinuationRefusedError",
   {

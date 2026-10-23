@@ -113,7 +113,6 @@ export interface ThreadManagementSendInput {
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly modelSelection?: ModelSelection;
-  /** Makes the send a quota continuation of this run, refused unless the thread allows it. */
   readonly quotaContinuationOfRunId?: RunId;
   readonly mode: ThreadManagementSendMode;
   readonly createdBy: OrchestrationV2Actor;

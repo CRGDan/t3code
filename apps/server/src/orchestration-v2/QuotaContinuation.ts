@@ -11,22 +11,14 @@ import * as DateTime from "effect/DateTime";
 
 import { threadShellFromProjection } from "./ProjectionStore.ts";
 
-/**
- * Why a quota recovery continuation of `sourceRunId` may not start, or null
- * when it may. The dispatcher calls this under the thread's lock and checks
- * Stop itself. A continuation is only for a usage-limit failure that native
- * recovery cannot own, on the provider and model that failed, while no user
- * hold or newer work stands in its way.
- */
 export function quotaContinuationRefusal(
   projection: OrchestrationV2ThreadProjection,
   sourceRunId: RunId,
   now: DateTime.Utc,
-): OrchestrationV2QuotaContinuationRefusal | null {
+): Exclude<OrchestrationV2QuotaContinuationRefusal, "stopped"> | null {
   const { thread, runs } = projection;
   if (thread.archivedAt !== null || thread.deletedAt !== null) return "closed";
   if (thread.lineage.relationshipToParent === "subagent") return "subagent_thread";
-  // A continuation cancelled before it started leaves the source latest again.
   if (runs.some((run) => run.quotaContinuationOfRunId === sourceRunId)) {
     return "already_continued";
   }
@@ -39,8 +31,6 @@ export function quotaContinuationRefusal(
   if (failure?.class !== "usage_limit" || shell.lastErrorClass !== "usage_limit") {
     return "not_usage_limit";
   }
-  // Native recovery owns a readable reset later than the failure, due or not.
-  // The same comparison selects its candidates in UsageLimitRecoveryWorker.
   const resetMs = Date.parse(failure.resetAt ?? "");
   if (
     Number.isFinite(resetMs) &&

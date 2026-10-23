@@ -109,7 +109,6 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
 
 it("publishes quota recovery as its own tool that takes only a thread and a failed run", () => {
   const schema = Tool.getJsonSchema(OrchestratorToolkit.tools.t3_thread_recover_quota);
-  // A gateway that finds no such tool on an older T3 must not fall back to a send.
   expect(Object.keys(OrchestratorToolkit.tools)).toContain("t3_thread_recover_quota");
   expect(schema).toMatchObject({ type: "object", required: ["threadId", "failedRunId"] });
   expect(Object.keys((schema as { properties: object }).properties)).toEqual([
