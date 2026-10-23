@@ -1,4 +1,5 @@
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
+import { latestExecutedRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -15,6 +16,7 @@ import {
   RuntimeRequestId,
   TurnItemId,
   type ModelSelection,
+  type OrchestrationV2Command,
   type OrchestrationV2Run,
   ProjectId,
   type PullRequestDetail,
@@ -5402,6 +5404,362 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.equal(resumed.runs[1]?.status, "starting");
         assert.isFalse(resumed.runs[1]?.queueHeld);
       }
+    }),
+  );
+});
+
+it.layer(layerTest)("gateway quota continuation", (it) => {
+  const seedQuotaFailure = Effect.fn("runtimeLayerTest.seedQuotaFailure")(function* (
+    name: string,
+    resetAt?: (completedAt: DateTime.Utc) => string,
+  ) {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const events = yield* EventSink.EventSinkV2;
+    const threadId = ThreadId.make(`quota:${name}`);
+    const projectId = ProjectId.make(`quota:project:${name}`);
+    yield* seedProject({
+      projectId,
+      title: "Quota project",
+      workspaceRoot: process.cwd(),
+      defaultModelSelection: modelSelection,
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`quota:create:${name}`),
+      threadId,
+      projectId,
+      title: "Limited thread",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`quota:message:${name}`),
+      threadId,
+      messageId: MessageId.make(`quota:message:${name}`),
+      text: "Work on this.",
+      attachments: [],
+      dispatchMode: { type: "defer_start" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const source = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    const now = yield* DateTime.now;
+    const reset = resetAt?.(now);
+    yield* events.write({
+      commandId: CommandId.make(`quota:failure:${name}`),
+      events: [
+        {
+          id: EventId.make(`quota:run:${name}`),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...source, status: "failed", completedAt: now },
+        },
+        {
+          id: EventId.make(`quota:error:${name}`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`quota:error:${name}`),
+            type: "error",
+            threadId,
+            runId: source.id,
+            nodeId: source.rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 2,
+            status: "failed",
+            title: "Usage limit reached",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            failure: {
+              class: "usage_limit",
+              message: "Plan limit reached.",
+              code: "usageLimitExceeded",
+              retryable: null,
+              ...(reset === undefined ? {} : { resetAt: reset }),
+            },
+          },
+        },
+      ],
+    });
+    // Each caller session derives its own command and message IDs.
+    const continuation = (session: string) => ({
+      type: "message.dispatch" as const,
+      commandId: CommandId.make(`quota:${name}:${session}`),
+      threadId,
+      messageId: MessageId.make(`quota:${name}:${session}`),
+      quotaContinuationOfRunId: source.id,
+      text: "Continue the previously authorized work.",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" as const },
+      createdBy: "agent" as const,
+      creationSource: "mcp" as const,
+    });
+    return { threadId, source, now, continuation };
+  });
+
+  const refusal = (command: OrchestrationV2Command) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const error = yield* orchestrator.dispatch(command).pipe(Effect.flip);
+      return error._tag === "OrchestratorQuotaContinuationRefusedError" ? error.reason : error._tag;
+    });
+
+  it.effect("starts exactly one linked continuation across concurrent sessions", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId, source, continuation } = yield* seedQuotaFailure("concurrent");
+      const exits = yield* Effect.all(
+        ["session-a", "session-b", "session-c"].map((session) =>
+          orchestrator.dispatch(continuation(session)).pipe(Effect.exit),
+        ),
+        { concurrency: "unbounded" },
+      );
+      assert.equal(exits.filter((exit) => exit._tag === "Success").length, 1);
+      const runs = (yield* orchestrator.getThreadProjection(threadId)).runs;
+      assert.lengthOf(runs, 2);
+      assert.equal(runs[1]?.status, "starting");
+      assert.equal(runs[1]?.quotaContinuationOfRunId, source.id);
+      assert.equal(yield* refusal(continuation("session-d")), "already_continued");
+    }),
+  );
+
+  it.effect("keeps a source consumed after its continuation is cancelled before starting", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const { threadId, source, continuation } = yield* seedQuotaFailure("cancelled");
+      yield* orchestrator.dispatch(continuation("session-a"));
+      const accepted = (yield* orchestrator.getThreadProjection(threadId)).runs[1]!;
+      const cancelledAt = yield* DateTime.now;
+      yield* events.write({
+        events: [
+          {
+            id: EventId.make("quota:cancelled:continuation"),
+            type: "run.updated",
+            threadId,
+            runId: accepted.id,
+            occurredAt: cancelledAt,
+            payload: { ...accepted, status: "cancelled", completedAt: cancelledAt },
+          },
+        ],
+      });
+      const runs = (yield* orchestrator.getThreadProjection(threadId)).runs;
+      assert.isNull(runs[1]?.startedAt);
+      assert.equal(runs[1]?.quotaContinuationOfRunId, source.id);
+      assert.equal(latestExecutedRun(runs)?.id, source.id);
+      assert.equal(yield* refusal(continuation("session-b")), "already_continued");
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
+    }),
+  );
+
+  it.effect.each([
+    ["missing", undefined, true],
+    ["malformed", () => "not-a-date", true],
+    ["stale", (at: DateTime.Utc) => DateTime.formatIso(DateTime.add(at, { minutes: -1 })), true],
+    ["at completion", (at: DateTime.Utc) => DateTime.formatIso(at), true],
+    ["future", (at: DateTime.Utc) => DateTime.formatIso(DateTime.add(at, { minutes: 5 })), false],
+    ["due", (at: DateTime.Utc) => DateTime.formatIso(DateTime.add(at, { seconds: 1 })), false],
+  ] as const)(
+    "leaves a %s reset to the gateway only when native recovery cannot own it",
+    ([name, resetAt, gatewayOwned]) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const { threadId, continuation } = yield* seedQuotaFailure(`reset:${name}`, resetAt);
+        // A valid reset after completion stays native even once it is due.
+        yield* TestClock.adjust("1 minute");
+        if (gatewayOwned) {
+          yield* orchestrator.dispatch(continuation("session-a"));
+          assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
+        } else {
+          assert.equal(yield* refusal(continuation("session-a")), "native_recovery");
+          assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
+        }
+      }),
+  );
+
+  it.effect.each([
+    "newer-run",
+    "stopped",
+    "snoozed",
+    "settled",
+    "archived",
+    "opted-out",
+    "question",
+    "model-changed",
+    "queue-held",
+    "subagent",
+  ] as const)("refuses a delayed continuation after %s without changing the thread", (hold) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const { threadId, source, now, continuation } = yield* seedQuotaFailure(`hold:${hold}`);
+      const thread = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      const writeThread = (payload: typeof thread) =>
+        events.write({
+          events: [
+            {
+              id: EventId.make(`quota:hold:${hold}`),
+              type: "thread.metadata-updated",
+              threadId,
+              occurredAt: now,
+              payload,
+            },
+          ],
+        });
+      const expected = {
+        "newer-run": "not_latest_failure",
+        stopped: "stopped",
+        snoozed: "snoozed",
+        settled: "settled",
+        archived: "closed",
+        "opted-out": "opted_out",
+        question: "pending_request",
+        "model-changed": "model_changed",
+        "queue-held": "queue_held",
+        subagent: "subagent_thread",
+      }[hold];
+      switch (hold) {
+        case "newer-run":
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("quota:hold:newer-run:user"),
+            threadId,
+            messageId: MessageId.make("quota:hold:newer-run:user"),
+            text: "Do something else.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          break;
+        case "stopped":
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("quota:hold:stop"),
+            threadId,
+          });
+          break;
+        case "snoozed":
+          yield* orchestrator.dispatch({
+            type: "thread.snooze",
+            commandId: CommandId.make("quota:hold:snooze"),
+            threadId,
+            snoozedUntil: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
+          });
+          break;
+        case "settled":
+          yield* orchestrator.dispatch({
+            type: "thread.settle",
+            commandId: CommandId.make("quota:hold:settle"),
+            threadId,
+          });
+          break;
+        case "archived":
+          yield* orchestrator.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make("quota:hold:archive"),
+            threadId,
+          });
+          break;
+        case "opted-out":
+          yield* writeThread({
+            ...thread,
+            limitRecovery: {
+              runId: source.id,
+              resetAt: DateTime.formatIso(now),
+              autoResume: false,
+            },
+          });
+          break;
+        case "question":
+          yield* events.write({
+            events: [
+              {
+                id: EventId.make("quota:hold:question"),
+                type: "runtime-request.updated",
+                threadId,
+                nodeId: source.rootNodeId!,
+                occurredAt: now,
+                payload: {
+                  id: RuntimeRequestId.make("quota:hold:question"),
+                  nodeId: source.rootNodeId!,
+                  providerTurnId: null,
+                  nativeRequestRef: null,
+                  kind: "user_input",
+                  status: "pending",
+                  responseCapability: { type: "message" },
+                  createdAt: now,
+                  resolvedAt: null,
+                },
+              },
+            ],
+          });
+          break;
+        case "model-changed":
+          yield* orchestrator.dispatch({
+            type: "thread.model-selection.set",
+            commandId: CommandId.make("quota:hold:model"),
+            threadId,
+            modelSelection: { ...modelSelection, model: "gpt-5.5" },
+          });
+          break;
+        case "queue-held": {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("quota:hold:queued"),
+            threadId,
+            messageId: MessageId.make("quota:hold:queued"),
+            text: "Run later.",
+            attachments: [],
+            dispatchMode: { type: "defer_start" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const queued = (yield* orchestrator.getThreadProjection(threadId)).runs[1]!;
+          yield* events.write({
+            events: [
+              {
+                id: EventId.make("quota:hold:queue-held"),
+                type: "run.updated",
+                threadId,
+                runId: queued.id,
+                occurredAt: now,
+                payload: { ...queued, status: "queued", queueHeld: true },
+              },
+            ],
+          });
+          break;
+        }
+        case "subagent":
+          yield* writeThread({
+            ...thread,
+            lineage: {
+              parentThreadId: ThreadId.make("quota:parent"),
+              relationshipToParent: "subagent",
+              rootThreadId: ThreadId.make("quota:parent"),
+            },
+          });
+          break;
+      }
+      const before = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(yield* refusal(continuation("session-a")), expected);
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(after.thread, before.thread);
+      assert.deepEqual(after.runs, before.runs);
+      assert.deepEqual(after.messages, before.messages);
     }),
   );
 });
